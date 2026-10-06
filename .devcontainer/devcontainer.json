@@ -11,7 +11,10 @@
       "extensions": [
         "ms-python.python",
         "charliermarsh.ruff",
-        "ms-python.mypy-type-checker"
+        "ms-python.mypy-type-checker",
+        "GitHub.vscode-pull-request-github",
+        "cweijan.vscode-database-client2",
+        "ms-azuretools.vscode-docker"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
