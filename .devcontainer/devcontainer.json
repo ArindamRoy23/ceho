@@ -1,0 +1,28 @@
+{
+  "name": "CEHO",
+  "dockerComposeFile": [],
+  "service": "app",
+  "workspaceFolder": "/workspaces/ceho",
+  "initializeCommand": "test -f .env || cp .env.example .env",
+  "postCreateCommand": "uv sync",
+  "remoteUser": "vscode",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "GitHub.vscode-pull-request-github",
+        "cweijan.vscode-database-client2",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  }
+}
