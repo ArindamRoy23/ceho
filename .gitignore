@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Local environment
-.env
+/.env
 
 # Tool caches
 .mypy_cache/

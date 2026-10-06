@@ -6,9 +6,9 @@ This page records the current local environment. It is not a product architectur
 
 ## What is set up
 
-The devcontainer in `.devcontainer/` runs the app container on Python 3.10 with [uv](https://docs.astral.sh/uv/), matching `.python-version`. `postCreateCommand` runs `uv sync`.
+The devcontainer in `.devcontainer/` runs the app container on Python 3.10 with [uv](https://docs.astral.sh/uv/), matching `.python-version`. The workspace is `/workspaces/ceho`. `postCreateCommand` runs `uv sync` into `/home/vscode/.venv`, so the container environment does not replace a `.venv` created on the host.
 
-PostgreSQL 16 is a second Compose service, used only so local work has a SQL database. Credentials in `.env.example` and the Compose file are development defaults (`ceho` / `ceho` on database `ceho`). They are not production secrets.
+PostgreSQL 16 is a second Compose service, used only so local work has a SQL database. Credentials in `.env` are development defaults (`ceho` / `ceho` on database `ceho`). They are not production secrets. `.env` is gitignored. `.env.example` is the template, and the devcontainer copies it to `.env` when the file is missing. Compose loads that same `.env` into the app and Postgres containers and uses it for variable substitution. `COMPOSE_FILE` in `.env` points at `.devcontainer/docker-compose.yml`. `dockerComposeFile` is empty so the devcontainer substitutes variables from this repo-root file.
 
 | Setting | Inside the devcontainer | From the host |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ PostgreSQL 16 is a second Compose service, used only so local work has a SQL dat
 | Port | `5432` | `5433` (published; set `POSTGRES_HOST_PORT` to change it) |
 | URL | `postgresql://ceho:ceho@postgres:5432/ceho` | `postgresql://ceho:ceho@localhost:5433/ceho` |
 
-Copy `.env.example` to `.env` before using the URL from the host. The devcontainer already sets `DATABASE_URL` to the in-network host.
+`.env` uses the in-network host `postgres`. From the host machine, point `DATABASE_URL` at `localhost` and `POSTGRES_HOST_PORT` instead.
 
 ## What is not set up
 

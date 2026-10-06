@@ -7,21 +7,26 @@ services:
       context: .
       dockerfile: Dockerfile
     volumes:
-      - ..:/workspaces/${localWorkspaceFolderBasename}:cached
+      - ..:/workspaces/ceho:cached
     command: sleep infinity
+    env_file:
+      - ../.env
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://ceho:ceho@postgres:5432/ceho
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ceho:ceho@postgres:5432/ceho}
+      UV_PROJECT_ENVIRONMENT: /home/vscode/.venv
 
   postgres:
     image: postgres:16
     restart: unless-stopped
+    env_file:
+      - ../.env
     environment:
-      POSTGRES_USER: ceho
-      POSTGRES_PASSWORD: ceho
-      POSTGRES_DB: ceho
+      POSTGRES_USER: ${POSTGRES_USER:-ceho}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ceho}
+      POSTGRES_DB: ${POSTGRES_DB:-ceho}
     ports:
       # Host port 5433 avoids colliding with another local Postgres on 5432.
       # Inside the Compose network the port is still 5432.
