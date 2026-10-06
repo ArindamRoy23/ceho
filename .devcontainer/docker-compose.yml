@@ -1,0 +1,38 @@
+# Local development only. PostgreSQL is a provisional choice and is not the
+# finalized CEHO data stack. Vector store, cache, and queue are intentionally
+# absent until the design discussion.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspaces/${localWorkspaceFolderBasename}:cached
+    command: sleep infinity
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://ceho:ceho@postgres:5432/ceho
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ceho
+      POSTGRES_PASSWORD: ceho
+      POSTGRES_DB: ceho
+    ports:
+      # Host port 5433 avoids colliding with another local Postgres on 5432.
+      # Inside the Compose network the port is still 5432.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ceho -d ceho"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

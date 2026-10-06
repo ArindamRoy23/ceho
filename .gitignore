@@ -9,6 +9,13 @@ wheels/
 # Virtual environments
 .venv
 
+# Local environment
+.env
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+
 
 # Personal MCP Server Config
 .cursor/mcp.json
