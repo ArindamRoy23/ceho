@@ -46,6 +46,8 @@ The long-term organizing object is likely to be the **Project**, not the individ
 
 ## 4. Problem statement
 
+
+
 ### 4.1 Core problem
 
 Live conversations are continuous and multi-speaker, but the value of a conversation is usually trapped in the moment it happens. People need to know who spoke, what was said, what was decided, what was committed, and where the evidence is, both during the interaction and across later work.
@@ -67,6 +69,8 @@ People working in live conversations need:
 - A way to ask questions during the live conversation
 - Project knowledge that accumulates across interactions
 
+
+
 ### 4.3 What organizations need
 
 - Real-time intelligence during the interaction, in addition to a record afterward
@@ -75,6 +79,8 @@ People working in live conversations need:
 - A stable, real-time conversation substrate for integrations and agents
 - Knowledge that connects across conversations, people, and projects
 - Latency, memory, and actionability as product capabilities
+
+
 
 ### 4.4 Distinct problem layers
 
@@ -86,6 +92,8 @@ The product must treat these as related but separable concerns:
 4. **Knowledge:** searchable, speaker-indexed, provenance-rich memory.
 5. **Intelligence:** insights, reasoning, agents, and analytics.
 6. **Action:** integrations and automated workflows.
+
+
 
 ## 5. Product vision
 
@@ -111,6 +119,8 @@ The platform eventually represents a temporally indexed multimodal interaction s
 Humans, user interfaces, search, memory, analytics, agents, integrations, and automation consume the same underlying interaction state rather than maintaining separate, inconsistent copies.
 
 ## 6. Product principles
+
+
 
 ### 6.1 Statefulness over fixed chunks
 
@@ -154,6 +164,8 @@ Consent, retention, deletion, tenant isolation, provenance, and access controls 
 
 ## 7. Goals
 
+
+
 ### 7.1 Foundation goals
 
 - Run every live conversation as a persistent streaming session with continuous state.
@@ -165,6 +177,8 @@ Consent, retention, deletion, tenant isolation, provenance, and access controls 
 - Provide configurable streaming text-to-speech where spoken output is required.
 - Expose conversation events to internal consumers.
 
+
+
 ### 7.2 Knowledge goals
 
 - Build speaker-indexed conversational memory.
@@ -172,6 +186,8 @@ Consent, retention, deletion, tenant isolation, provenance, and access controls 
 - Answer questions such as “What did Speaker B commit to doing?”
 - Link every answer or memory to the supporting transcript and audio interval.
 - Support conversation-, person-, project-, and organization-level memory with distinct permissions and retention.
+
+
 
 ### 7.3 Intelligence and action goals
 
@@ -181,6 +197,8 @@ Consent, retention, deletion, tenant isolation, provenance, and access controls 
 - Connect agents to external systems through a tool layer such as MCP.
 - Turn detected intent, decisions, and actions into permissioned workflows.
 
+
+
 ### 7.4 Platform goals
 
 - Support shared projects containing many conversations and artifacts.
@@ -188,6 +206,8 @@ Consent, retention, deletion, tenant isolation, provenance, and access controls 
 - Resolve participant identity across authorized conversations with explicit confidence.
 - Add video, screen, text, documents, and other useful temporal streams later.
 - Offer APIs and event subscriptions for third-party developers.
+
+
 
 ## 8. Non-goals and boundaries
 
@@ -204,7 +224,11 @@ The following are not assumptions or initial-release requirements:
 - Building generic sentiment analysis without a concrete user decision or workflow.
 - Destructively moving or rewriting source data when projects are merged or split.
 
+
+
 ## 9. Target users and stakeholders
+
+
 
 ### 9.1 Individual participant
 
@@ -242,6 +266,8 @@ Needs session APIs, event subscriptions, stable data contracts, project-scoped r
 
 ## 10. Core user journeys
 
+
+
 ### 10.1 Start and maintain a live conversation
 
 1. A user starts a CEHO conversation.
@@ -251,6 +277,8 @@ Needs session APIs, event subscriptions, stable data contracts, project-scoped r
 5. As evidence increases, partial content is updated and finalized.
 6. If the connection drops, a new session reconnects to the same logical conversation.
 7. The user sees speaker-aware transcript output with low latency.
+
+
 
 ### 10.2 Ask about the live conversation
 
@@ -271,6 +299,8 @@ CEHO uses the current conversation state, speaker context, prior interactions, a
 4. The alert includes evidence, confidence, and the applicable policy source.
 5. The user can dismiss, acknowledge, or act on it.
 
+
+
 ### 10.4 Review a conversation
 
 After a conversation, a user can:
@@ -281,6 +311,8 @@ After a conversation, a user can:
 - Jump from a derived item to the exact transcript and audio.
 - Correct speakers or text, subject to permissions.
 - Ask questions about the interaction.
+
+
 
 ### 10.5 Ask the past
 
@@ -300,6 +332,8 @@ CEHO searches project-scoped memory and returns an answer with source conversati
 3. People, decisions, commitments, issues, documents, actions, and timeline are connected.
 4. A user asks, “What has Bob committed to on Project X?”
 5. CEHO answers across all authorized interactions, not just one meeting.
+
+
 
 ### 10.7 Bring in a specialized agent
 
@@ -336,6 +370,8 @@ Users can:
 - Split one project into workstream views based on selected conversations or artifacts.
 - Preserve all original provenance, history, permissions, and links.
 
+
+
 ## 11. Conceptual model
 
 CEHO must separate the following concepts.
@@ -360,6 +396,8 @@ A knowledge and interaction boundary containing or referencing:
 - Derived insights
 - Child, parent, or related projects
 
+
+
 ### 11.3 Conversation
 
 A logical human or human-agent interaction. A conversation can span one or more technical sessions.
@@ -382,6 +420,8 @@ A generic stream envelope should include:
 - Payload or payload reference
 - Metadata
 - Quality or integrity information
+
+
 
 ### 11.6 Event
 
@@ -408,6 +448,8 @@ An AI participant or background consumer with instructions, knowledge, tools, tr
 A derived, queryable representation of information such as entities, claims, decisions, commitments, actions, preferences, relationships, issues, and outcomes. Memory must link to source evidence.
 
 ## 12. Functional requirements: streaming and session layer
+
+
 
 ### FR-1 Persistent connection
 
@@ -439,6 +481,8 @@ The architecture should support later adapters for phone/SIP, conferencing platf
 
 ## 13. Functional requirements: perception
 
+
+
 ### FR-8 Voice activity detection
 
 The system must detect speech, silence, overlap, and relevant non-speech intervals with timestamps.
@@ -462,6 +506,8 @@ Turn boundaries must use a combination of:
 - Context window
 - Latency budget
 - Overlap and interruption signals
+
+
 
 ### FR-12 Streaming transcription
 
@@ -488,6 +534,8 @@ The design must allow multilingual speech, language switching, accents, and doma
 Text-to-speech must be configurable by voice, language, style, channel, and agent, while remaining separate from perception and memory.
 
 ## 14. Functional requirements: revision-aware conversation state
+
+
 
 ### FR-18 Event lifecycle
 
@@ -588,6 +636,8 @@ The exact transport and schema technology are implementation decisions. Event se
 
 ## 16. Functional requirements: transcript and conversation experience
 
+
+
 ### FR-25 Live transcript
 
 Users must see low-latency transcript updates, speaker labels, and stabilization state without distracting visual churn.
@@ -618,11 +668,15 @@ The post-conversation experience should generate:
 - Follow-up draft
 - Suggested system updates
 
+
+
 ### FR-30 Long-conversation context
 
 The system must preserve relevant context throughout a conversation, including conversations substantially longer than a single model context window, through state, retrieval, and summarization.
 
 ## 17. Functional requirements: memory and retrieval
+
+
 
 ### FR-31 Speaker-indexed memory
 
@@ -641,6 +695,8 @@ Memory must be indexed by local speaker and, when resolved, person. It should ca
 - Relationships
 - Outcomes
 - Source and confidence
+
+
 
 ### FR-32 Shared conversation memory
 
@@ -677,6 +733,8 @@ Person memory:
 Bob has an outstanding commitment on Project X
 ```
 
+
+
 ### FR-35 Provenance
 
 Every durable memory item must retain links to supporting conversation events, transcript intervals, and source media where available.
@@ -704,6 +762,8 @@ Users and agents must be able to retrieve by:
 - Confidence
 - Decision, commitment, action, risk, or outcome
 
+
+
 ### FR-39 Conversation graph
 
 The system should support graph-like relations such as:
@@ -726,13 +786,15 @@ Authorized deletion of a conversation, person link, or memory must propagate to 
 
 ## 18. Functional requirements: speaker and person identity
 
+
+
 ### FR-42 Local identity by default
 
 Every conversation can use anonymous local speaker IDs without resolving participants to persistent people.
 
 ### FR-43 Probabilistic resolution
 
-Cross-conversation matching must be represented as a claim:
+Cross-conversation matching must be represented as a claim. This should be tenant segragated audio hash mapping (maybe), with a in session confirmation. :
 
 ```text
 speaker_7 -> Person_42
@@ -740,6 +802,8 @@ confidence: 0.94
 evidence: voice embedding + participant metadata
 scope: Project X
 ```
+
+
 
 ### FR-44 Multiple evidence sources
 
@@ -763,6 +827,8 @@ Voice identity features require explicit policy, consent where applicable, acces
 
 ## 19. Functional requirements: projects
 
+
+
 ### FR-49 Project contents
 
 A project must be able to contain or reference conversations, streams, people, agents, memories, documents, integrations, permissions, policies, and derived insights.
@@ -782,6 +848,8 @@ CEHO must derive evolving project state across interactions rather than only sto
 Example:
 
 > “The team committed to June delivery, the date moved twice, and the dependency from Team B remains unresolved.”
+
+
 
 ### FR-53 Non-destructive composition
 
@@ -804,6 +872,8 @@ Project queries must include project conversation memory, relevant person memory
 Agents can be attached to a project with project-specific instructions, knowledge, triggers, tools, permissions, and memory.
 
 ## 20. Functional requirements: real-time interaction and insights
+
+
 
 ### FR-58 Talkback and copilot
 
@@ -846,11 +916,15 @@ The system may provide:
 - Question-without-answer detection
 - Repeated topic detection
 
+
+
 ### FR-63 Trigger configuration
 
 Users or administrators can configure which insights and agents run, trigger conditions, recipients, channels, and escalation behavior.
 
 ## 21. Functional requirements: agents
+
+
 
 ### FR-64 Agent definition
 
@@ -866,6 +940,8 @@ An agent consists of:
 - Permissions
 - Optional voice and presentation settings
 
+
+
 ### FR-65 Specialized agents
 
 The platform should support agents such as:
@@ -878,6 +954,8 @@ The platform should support agents such as:
 - Compliance agent
 - Project manager
 - Customer support agent
+
+
 
 ### FR-66 Conversation-aware expertise
 
@@ -894,6 +972,8 @@ An agent may:
 - Suggest an action
 - Execute an approved action
 - Join the conversation with text or voice
+
+
 
 ### FR-68 Multi-agent subscription
 
@@ -913,6 +993,8 @@ Agent inputs, outputs, evidence, tool requests, tool results, approvals, and err
 
 ## 22. Functional requirements: integrations and automation
 
+
+
 ### FR-72 Communication integrations
 
 Potential channels include:
@@ -925,6 +1007,8 @@ Potential channels include:
 - WhatsApp
 - Phone/SIP
 - Discord
+
+
 
 ### FR-73 Work-system integrations
 
@@ -940,6 +1024,8 @@ Potential systems include:
 - SharePoint
 - Confluence
 
+
+
 ### FR-74 Actions
 
 Agents or users may:
@@ -952,6 +1038,8 @@ Agents or users may:
 - Notify a team
 - Add a reminder
 - Update project status
+
+
 
 ### FR-75 Permission and approval
 
@@ -971,6 +1059,8 @@ The system must expose tool failures, retry status, partial completion, and comp
 
 ## 23. Functional requirements: meeting and project intelligence
 
+
+
 ### FR-79 Structured meeting output
 
 The platform must derive summaries, decisions, commitments, actions, owners, dates, unresolved questions, risks, and follow-up content.
@@ -988,11 +1078,15 @@ The system must distinguish:
 - What came from a document or external system
 - What was generated by an agent
 
+
+
 ### FR-82 Outcome linkage
 
 Where integrations permit, conversation patterns should be linkable to outcomes such as conversion, churn, escalation, resolution, or missed commitments.
 
 ## 24. Functional requirements: multimodality
+
+
 
 ### FR-83 Unified temporal model
 
@@ -1010,6 +1104,8 @@ Future screen support should answer questions such as:
 - “Which slide did we discuss this on?”
 - “Open the dashboard Sarah was talking about.”
 
+
+
 ### FR-86 Video context
 
 Future video support may extract presentation changes, whiteboards, demonstrations, relevant gestures, and product interactions where lawful and useful.
@@ -1024,6 +1120,8 @@ Each source and modality must have explicit collection, access, retention, and r
 
 ## 25. Functional requirements: search and personal assistance
 
+
+
 ### FR-89 Universal conversation search
 
 Authorized users should be able to search queries such as:
@@ -1031,6 +1129,8 @@ Authorized users should be able to search queries such as:
 - “Find every time customers complained about pricing.”
 - “Show conversations where someone promised a refund.”
 - “Find every meeting where Project Atlas was mentioned and the deadline moved.”
+
+
 
 ### FR-90 Cross-source search
 
@@ -1050,6 +1150,8 @@ A user should be able to ask, “What am I waiting on?” and retrieve outstandi
 
 ## 26. Functional requirements: simulation and training
 
+
+
 ### FR-94 Scenario simulation
 
 The platform may use conversation data, domain knowledge, and agents to simulate realistic training interactions.
@@ -1062,6 +1164,8 @@ Example simulated participants include:
 - Elderly customer
 - High-value customer
 
+
+
 ### FR-95 Evaluation
 
 Training sessions may score:
@@ -1073,11 +1177,15 @@ Training sessions may score:
 - Missed information
 - Escalation behavior
 
+
+
 ### FR-96 Separation from production identity
 
 Simulation data and synthetic identities must be clearly labeled and isolated from real person memory.
 
 ## 27. Functional requirements: analytics
+
+
 
 ### FR-97 Structured analytical model
 
@@ -1094,6 +1202,8 @@ Analytics should use a structured model containing:
 - Outcomes
 - Temporal evolution
 
+
+
 ### FR-98 Business questions
 
 The platform should support questions such as:
@@ -1102,6 +1212,8 @@ The platform should support questions such as:
 - Which responses correlate with conversion?
 - What topics cause support escalation?
 - Which commitments are most frequently missed?
+
+
 
 ### FR-99 Aggregation safeguards
 
@@ -1128,6 +1240,8 @@ POST /integrations
 POST /search
 ```
 
+
+
 ### FR-101 Event subscriptions
 
 Developers must be able to subscribe to authorized events such as:
@@ -1142,6 +1256,8 @@ Developers must be able to subscribe to authorized events such as:
 - `risk.detected`
 - `memory.created`
 - `memory.updated`
+
+
 
 ### FR-102 Versioning
 
@@ -1161,6 +1277,8 @@ The developer platform should provide synthetic or consented sample conversation
 
 ## 29. Governance, privacy, and enterprise controls
 
+
+
 ### 29.1 Required capabilities
 
 - PII detection and redaction
@@ -1179,6 +1297,8 @@ The developer platform should provide synthetic or consented sample conversation
 - “Forget this conversation” workflows
 - Explanation of why a fact exists
 
+
+
 ### 29.2 Provenance example
 
 CEHO must be able to answer:
@@ -1194,6 +1314,8 @@ Project memory
   -> Audio 01:12:14–01:12:21
 ```
 
+
+
 ### 29.3 Derived-data governance
 
 Deleting or restricting source data must also affect:
@@ -1207,11 +1329,15 @@ Deleting or restricting source data must also affect:
 - Identity evidence
 - Exported or queued automations where technically possible
 
+
+
 ### 29.4 Sensitive inference
 
 Emotion, identity, health, financial, legal, or other sensitive inferences require explicit use-case review. Confidence must be visible, and the system must not present probabilistic judgments as objective fact.
 
 ## 30. Non-functional requirements
+
+
 
 ### NFR-1 Latency
 
@@ -1329,7 +1455,11 @@ At broader scope:
                                           Applications
 ```
 
+
+
 ## 32. Model strategy
+
+
 
 ### 32.1 Do not assume one model
 
@@ -1360,6 +1490,8 @@ Audio-native or multimodal candidates must be benchmarked against specialized ba
 - Reliability
 - Tool and response quality
 
+
+
 ### 32.3 Potential training data
 
 Fine-tuning or training examples may contain:
@@ -1370,6 +1502,8 @@ Fine-tuning or training examples may contain:
 - Transcript
 - Turn boundaries
 - Conversational context
+
+
 
 ### 32.4 Potential objectives
 
@@ -1397,6 +1531,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Overlap detection quality
 - Named-entity accuracy
 
+
+
 ### 33.2 Streaming quality
 
 - Time to first transcript
@@ -1409,6 +1545,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Reconnect recovery time
 - Dropped or duplicated event rate
 
+
+
 ### 33.3 Conversation quality
 
 - Missed-turn rate
@@ -1417,6 +1555,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Long-conversation response quality
 - Question and decision extraction accuracy
 - User correction rate
+
+
 
 ### 33.4 Memory and retrieval
 
@@ -1428,6 +1568,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Contradiction-detection quality
 - Stale-memory rate
 - Deletion propagation completeness
+
+
 
 ### 33.5 Agent and action quality
 
@@ -1441,6 +1583,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Alert precision and recall
 - Alert dismissal rate
 
+
+
 ### 33.6 Product outcomes
 
 - Conversation completion rate
@@ -1453,6 +1597,8 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Retention
 - Customer-specific business outcomes
 
+
+
 ### 33.7 Cost and reliability
 
 - Cost per live minute
@@ -1463,7 +1609,11 @@ Metrics define CEHO’s quality bar and compare component and model candidates o
 - Projection lag
 - Agent and integration error rates
 
+
+
 ## 34. Evaluation framework
+
+
 
 ### 34.1 Representative datasets
 
@@ -1481,6 +1631,8 @@ Evaluation must cover:
 - Code-switching where supported
 - Reconnects and packet loss
 
+
+
 ### 34.2 Ground truth
 
 The evaluation corpus should include human-verified transcript, timing, speaker labels, turn boundaries, and structured conversation outcomes where possible.
@@ -1496,11 +1648,15 @@ Strong WER alone is insufficient. CEHO must test:
 - Tool arguments and side effects
 - Project-state evolution
 
+
+
 ### 34.4 Online quality
 
 The platform should support privacy-safe monitoring, explicit user feedback, corrections, sampled review, regression dashboards, and model/version comparisons.
 
 ## 35. Phased delivery
+
+
 
 ### Phase 0: Contracts and measurement
 
@@ -1615,6 +1771,8 @@ The platform should support privacy-safe monitoring, explicit user feedback, cor
 - Simulation and training
 - Broader ecosystem
 
+
+
 ## 36. Initial milestone acceptance criteria
 
 The first architectural milestone is complete when:
@@ -1635,6 +1793,8 @@ The first architectural milestone is complete when:
 Numeric thresholds will be set from the milestone measurements and the target workflows.
 
 ## 37. Key risks and mitigations
+
+
 
 ### 37.1 Scope dilution
 
@@ -1723,7 +1883,11 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - Evaluation datasets and annotation processes
 - Observability and cost metering
 
+
+
 ## 39. Open product questions
+
+
 
 ### Initial product
 
@@ -1734,6 +1898,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - What is the acceptable transcript stabilization delay?
 - How should partial revisions be displayed without distracting users?
 
+
+
 ### Speaker and identity
 
 - When should CEHO ask a user to name a local speaker?
@@ -1741,6 +1907,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - Is voice matching opt-in per user, project, or organization?
 - What confidence requires human confirmation?
 - How are guests and shared devices handled?
+
+
 
 ### Memory
 
@@ -1750,6 +1918,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - How should contradictions and changing opinions be represented?
 - When does a conversation memory promote to project or person memory?
 
+
+
 ### Projects
 
 - Can one conversation belong to multiple projects?
@@ -1757,6 +1927,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - Are composed projects materialized or evaluated dynamically?
 - Who can split, merge, or relink project scopes?
 - How are project policies inherited?
+
+
 
 ### Agents and insights
 
@@ -1766,6 +1938,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - How are multi-agent conflicts resolved?
 - Which actions always require approval?
 
+
+
 ### Governance
 
 - Which compliance regimes and residency requirements are launch constraints?
@@ -1774,11 +1948,15 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - Can customers disable all cross-conversation processing?
 - How are model training and quality review separated from customer data?
 
+
+
 ### Business model
 
 - Is pricing based on live minutes, stored hours, users, projects, agents, tool actions, or a combination?
 - Which capabilities are platform APIs versus end-user application features?
 - Which integrations are first-party, partner-built, or developer-built?
+
+
 
 ## 40. Decisions explicitly deferred
 
@@ -1791,6 +1969,8 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 - Exact model training strategy
 - Numeric SLOs before the first milestone is measured
 - Final packaging and pricing
+
+
 
 ## 41. Recommended decomposition after this PRD
 
@@ -1812,6 +1992,8 @@ This comprehensive document should be split into:
 14. Developer platform PRD
 15. Simulation and training PRD
 
+
+
 ## 42. Glossary
 
 - **ASR:** Automatic speech recognition.
@@ -1831,6 +2013,8 @@ This comprehensive document should be split into:
 - **Turn:** A bounded unit of communication associated with a speaker hypothesis.
 - **VAD:** Voice activity detection.
 - **WER:** Word error rate.
+
+
 
 ## 43. Final product framing
 
