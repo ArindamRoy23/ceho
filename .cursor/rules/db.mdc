@@ -1,0 +1,14 @@
+---
+description: Database schema and access go through SQLAlchemy and Alembic
+alwaysApply: true
+---
+
+# Database
+
+Use SQLAlchemy for models and queries. Use Alembic for every schema change.
+
+- Mapped classes are the schema source of truth. Put them in the `ceho_core` schema.
+- A model change ships with an Alembic revision in the same change. Apply it with `alembic upgrade head`.
+- Do not change the database with `metadata.create_all()`, hand-written DDL, or an edit to a live database.
+- Review autogenerate output before applying it. Write these by hand when autogenerate drops them: composite foreign keys, `ON DELETE SET NULL (user_id)`, check constraints, and the `updated_at` trigger.
+- Each environment runs `alembic upgrade head` once, from the release step, before the new app serves traffic.

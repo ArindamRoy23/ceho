@@ -1,0 +1,16 @@
+---
+description: One uv workspace; shared dependencies on the root, member-specific dependencies on the member
+alwaysApply: true
+---
+
+# Packages
+
+Python code lives in one uv workspace with one `uv.lock` at the repo root. A subdirectory package is a member of that workspace. Members do not contain their own workspace.
+
+The root package holds dependencies used across the repo. A member holds the dependencies only it uses, and it depends on the root package when it uses the shared ones. uv installs the dependency list of the package you sync. `uv sync --package <name>` installs that member, the root package, and the dependencies each declares.
+
+Add a member when that code needs its own dependencies, entrypoint, or deployable. Until then, leave it as a module of an existing package.
+
+- The frontend lives in this repo with its own package manager and is not a workspace member.
+- Development tools stay in the root `dev` group.
+- A marketplace adapter ships in its own environment and its own lockfile.
