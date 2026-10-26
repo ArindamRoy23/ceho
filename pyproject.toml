@@ -3,6 +3,8 @@ name = "ceho"
 version = "0.1.0"
 description = "Persistent, speaker-aware conversational runtime"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.20.1",
