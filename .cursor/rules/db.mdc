@@ -12,3 +12,5 @@ Use SQLAlchemy for models and queries. Use Alembic for every schema change.
 - Do not change the database with `metadata.create_all()`, hand-written DDL, or an edit to a live database.
 - Review autogenerate output before applying it. Write these by hand when autogenerate drops them: composite foreign keys, `ON DELETE SET NULL (user_id)`, check constraints, and the `updated_at` trigger.
 - Each environment runs `alembic upgrade head` once, from the release step, before the new app serves traffic.
+
+1 is the generic tenant id, and this data is global to all tenants.

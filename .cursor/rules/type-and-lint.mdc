@@ -1,0 +1,31 @@
+---
+description: Run mypy and ruff on Python files changed on the current branch before finishing work and before opening a pull request
+alwaysApply: true
+---
+
+# Type and lint checks
+
+Before finishing any change, and again before opening a pull request, check only the Python files changed on the current branch. Do not run ruff or mypy on the whole tree.
+
+Changed files are the committed diff against `main`, plus staged, unstaged, and untracked `*.py` files. From the repo root:
+
+```bash
+base=$(git merge-base HEAD main 2>/dev/null || git merge-base HEAD origin/main)
+mapfile -t files < <(
+  {
+    git diff --name-only --diff-filter=ACMR "$base"...HEAD
+    git diff --name-only --diff-filter=ACMR HEAD
+    git ls-files --others --exclude-standard
+  } | grep -E '\.py$' | sort -u
+)
+```
+
+If `files` is empty, skip the checks and say so. Otherwise:
+
+```bash
+uv run ruff check "${files[@]}"
+uv run ruff format --check "${files[@]}"
+uv run mypy --follow-imports=silent "${files[@]}"
+```
+
+Fix every failure in those files before treating the work as done or opening the pull request. Format only those files with `uv run ruff format "${files[@]}"`, then re-run the format check.

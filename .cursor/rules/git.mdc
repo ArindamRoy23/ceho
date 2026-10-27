@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+Never commit to main directly. Always create a new branch and open a pull request. 
+Follow trunk based development. Small features, small PRs!
