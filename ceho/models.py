@@ -4,8 +4,10 @@ Ids are bigint identity columns. tenant_id is a foreign key, not part of the
 primary key. Child rows also reference (tenant_id, parent id) so a session,
 participant, or transcript cannot point at another tenant.
 
-channels is a global catalog (WebRTC, Slack, Teams, and so on). It has no
-tenant_id. A tenant-owned endpoint would be a different table.
+Tenant 1 is the generic tenant. A row stored there is global to all tenants.
+channels is that catalog (WebRTC, Slack, Teams, and so on): a session may use
+a channel owned by its own tenant or by the generic tenant. A channel owned
+by any other tenant stays private to that tenant.
 
 Transcript identity is (session_id, turn_index). turn_index repeats in every
 session, so it cannot be a primary key by itself.
@@ -31,6 +33,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA = "ceho_core"
+
+# Rows owned by this tenant are visible to every tenant.
+GENERIC_TENANT_ID = 1
 
 SET_UPDATED_AT_FUNCTION = """
 CREATE OR REPLACE FUNCTION ceho_core.set_updated_at()
@@ -95,9 +100,19 @@ class Tenant(Timestamped, Base):
 
 class Channel(Timestamped, Base):
     __tablename__ = "channels"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            [f"{SCHEMA}.tenants.tenant_id"],
+            name="channels_tenant_id_fkey",
+        ),
+        UniqueConstraint("tenant_id", "channel_id", name="channels_tenant_channel_unique"),
+        UniqueConstraint("tenant_id", "channel_name", name="channels_tenant_name_unique"),
+    )
 
     channel_id: Mapped[int] = _identity()
-    channel_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_name: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class User(Timestamped, Base):
@@ -127,22 +142,28 @@ class Session(Timestamped, Base):
             "OR (status = 'ended' AND ended_at IS NOT NULL AND ended_at >= started_at)",
             name="sessions_ended_timestamp_check",
         ),
+        # A session uses its own channel, or a channel of the generic tenant.
+        CheckConstraint(
+            f"channel_tenant_id = tenant_id OR channel_tenant_id = {GENERIC_TENANT_ID}",
+            name="sessions_channel_tenant_check",
+        ),
         ForeignKeyConstraint(
             ["tenant_id"],
             [f"{SCHEMA}.tenants.tenant_id"],
             name="sessions_tenant_id_fkey",
         ),
         ForeignKeyConstraint(
-            ["channel_id"],
-            [f"{SCHEMA}.channels.channel_id"],
-            name="sessions_channel_id_fkey",
+            ["channel_tenant_id", "channel_id"],
+            [f"{SCHEMA}.channels.tenant_id", f"{SCHEMA}.channels.channel_id"],
+            name="sessions_tenant_channel_fkey",
         ),
         UniqueConstraint("tenant_id", "session_id", name="sessions_tenant_session_unique"),
-        Index("sessions_channel_id_idx", "channel_id"),
+        Index("sessions_channel_idx", "channel_tenant_id", "channel_id"),
     )
 
     session_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     session_description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
