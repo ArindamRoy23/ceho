@@ -7,7 +7,7 @@ alwaysApply: true
 
 Use SQLAlchemy for models and queries. Use Alembic for every schema change.
 
-- Mapped classes are the schema source of truth. Put them in the `ceho_core` schema.
+- Mapped classes are the schema source of truth. Put them in the `ceho_core` schema for the hot path.
 - A model change ships with an Alembic revision in the same change. Apply it with `alembic upgrade head`.
 - Do not change the database with `metadata.create_all()`, hand-written DDL, or an edit to a live database.
 - Review autogenerate output before applying it. Write these by hand when autogenerate drops them: composite foreign keys, `ON DELETE SET NULL (user_id)`, check constraints, and the `updated_at` trigger.
