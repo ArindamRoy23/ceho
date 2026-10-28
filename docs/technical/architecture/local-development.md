@@ -35,3 +35,23 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and on pushes 
 - `uv run mypy .`
 
 Ruff and mypy are development dependencies. mypy checks function bodies (`check_untyped_defs`) without requiring annotations on every function yet.
+
+## Hot-server foundation
+
+The hot-server ASGI factory is `ceho.hot.server:create_app`. After copying
+`.env.example` to `.env`, start the server from the repo root:
+
+```bash
+uv run python -m ceho.hot.server
+```
+
+`HotServerSettings.from_environment` loads that `.env` when it reads the
+process environment. Variables already set in the process stay in place.
+Modules take a `HotServerSettings` value from that read.
+
+The server listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`
+when unset) and exposes `GET /health`. It validates `DATABASE_URL`,
+`CEHO_MEDIA_STORAGE_URI`, `CEHO_SIGNALING_SECRET`, and
+`CEHO_EVENT_PUBLISHER_URL` before startup. The sample media URI and in-memory
+publisher are development-only placeholders; this foundation does not record
+audio or publish events yet.
