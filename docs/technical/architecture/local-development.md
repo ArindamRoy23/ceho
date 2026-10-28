@@ -39,14 +39,15 @@ Ruff and mypy are development dependencies. mypy checks function bodies (`check_
 ## Hot-server foundation
 
 The hot-server ASGI factory is `ceho.hot.server:create_app`. After copying
-`.env.example` to `.env`, load it into the shell and run:
+`.env.example` to `.env`, start the server from the repo root:
 
 ```bash
-set -a
-. ./.env
-set +a
-uv run ceho-hot
+uv run python -m ceho.hot.server
 ```
+
+`HotServerSettings.from_environment` loads that `.env` when it reads the
+process environment. Variables already set in the process stay in place.
+Modules take a `HotServerSettings` value from that read.
 
 The server listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`
 when unset) and exposes `GET /health`. It validates `DATABASE_URL`,

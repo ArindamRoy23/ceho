@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+
 
 class ConfigurationError(ValueError):
     """Raised when required hot-server configuration is absent or invalid."""
@@ -51,8 +53,17 @@ class HotServerSettings:
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> HotServerSettings:
-        """Build settings from the process environment."""
-        source = os.environ if environment is None else environment
+        """Build settings from the process environment.
+
+        With no mapping, load ``.env`` from the working directory and then read
+        the process environment. Names already set in the process stay in place.
+        An explicit mapping is used as given.
+        """
+        if environment is None:
+            load_dotenv()
+            source: Mapping[str, str] = os.environ
+        else:
+            source = environment
         return cls(
             database_url=_url_value("DATABASE_URL", source),
             media_storage_uri=_url_value("CEHO_MEDIA_STORAGE_URI", source),

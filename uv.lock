@@ -417,6 +417,7 @@ dependencies = [
     { name = "pipecat-ai", version = "0.0.108", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pipecat-ai", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "python-dotenv" },
     { name = "sqlalchemy", version = "2.0.55", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sqlalchemy", version = "2.1.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "uvicorn", extra = ["standard"] },
@@ -434,6 +435,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "pipecat-ai", specifier = ">=0.0.90" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
     { name = "sqlalchemy", specifier = ">=2.0.55" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]

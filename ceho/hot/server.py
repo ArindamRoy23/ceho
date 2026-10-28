@@ -37,6 +37,10 @@ def create_app(settings: HotServerSettings | None = None) -> FastAPI:
 
 
 def main() -> None:
-    """Run the hot server through the installed ``ceho-hot`` command."""
+    """Run the hot server with settings from the process environment."""
     settings = HotServerSettings.from_environment()
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+
+
+if __name__ == "__main__":
+    main()
