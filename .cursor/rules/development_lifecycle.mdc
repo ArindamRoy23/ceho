@@ -2,7 +2,8 @@
 alwaysApply: true
 ---
 Everything is driven by github issues and PRs.
-Before writing any code, come up with a clear design on what has to happen in the issue body. Consider this as documentation of the PR. 
-Once the feature is ready to be implemented, create a new branch and open a pull request. 
-In each pull request, ensure the documentation in the docs/* has been updated to reflect the changes. 
+Before writing any code, come up with a clear design on what has to happen in the issue body. Consider this as documentation of the PR.
+Once the feature is ready to be implemented, create a new branch and open a pull request.
+In each pull request, ensure the documentation in the docs/* has been updated to reflect the changes.
 The issue body is the PR description.
+Keep all implementation detail in the LLD; see the docs rule.

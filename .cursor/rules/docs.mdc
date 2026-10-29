@@ -1,0 +1,27 @@
+---
+description: Keep technical implementation detail in the LLD; avoid doc proliferation
+alwaysApply: true
+---
+
+# Documentation maintenance
+
+`docs/contributions.md` is the product-manual policy. This rule covers where
+implementation detail goes while the hot-server design is concentrated.
+
+## Single technical design home
+
+- Put all implementation detail in
+  `docs/technical/architecture/low-level-design.md` (the LLD).
+- Do not add new architecture pages for slices of that design (schema notes,
+  process foundation, outbox shape, and similar). Update the LLD instead.
+- Split a topic out of the LLD only when the team explicitly asks for a later
+  split.
+
+## What other docs may hold
+
+- `docs/technical/architecture/local-development.md`: This is running memory/ scratch pad. This will never be commited. Make all implementation updates in the LLD.
+- `docs/technical/architecture/high-level-design.md`: product-level shape, not
+  table-level or process-level or implementation detail.
+- `docs/functional/`: observable product behavior only, once it exists.
+- Issues hold acceptance criteria. Do not copy those into the manual.
+
