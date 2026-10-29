@@ -1,4 +1,9 @@
-"""Runtime configuration for the CEHO hot server."""
+"""Runtime configuration for the CEHO hot server.
+
+Process settings and the direct-source pipeline format are separate types
+in this module. Process settings come from the environment. The pipeline
+format is the PCM contract for one direct source.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +42,11 @@ def _s3_uri(name: str, environment: Mapping[str, str]) -> str:
     return value
 
 
+def _optional_value(name: str, environment: Mapping[str, str]) -> str | None:
+    value = environment.get(name, "").strip()
+    return value or None
+
+
 def _optional_http_url(name: str, environment: Mapping[str, str]) -> str | None:
     value = environment.get(name, "").strip()
     if not value:
@@ -66,6 +76,23 @@ def _port_value(environment: Mapping[str, str]) -> int:
 
 
 @dataclass(frozen=True)
+class DirectSourcePipelineConfig:
+    """PCM format and provider-failure bound for one direct-source STT run."""
+
+    sample_rate: int = 16_000
+    sample_width: int = 2
+    channels: int = 1
+    max_provider_failures: int = 3
+
+    def frame_bytes(self, frame_ms: int) -> int:
+        """Return the PCM size of one frame at this format."""
+        return self.sample_rate * frame_ms // 1000 * self.sample_width * self.channels
+
+
+DIRECT_SOURCE_PIPELINE = DirectSourcePipelineConfig()
+
+
+@dataclass(frozen=True)
 class HotServerSettings:
     """Validated configuration needed before the hot server can start."""
 
@@ -79,6 +106,7 @@ class HotServerSettings:
     event_publisher_url: str
     host: str
     port: int
+    deepgram_api_key: str | None = None
 
     @property
     def s3_use_path_style(self) -> bool:
@@ -109,4 +137,5 @@ class HotServerSettings:
             event_publisher_url=_url_value("CEHO_EVENT_PUBLISHER_URL", source),
             host=source.get("CEHO_HOST", "127.0.0.1"),
             port=_port_value(source),
+            deepgram_api_key=_optional_value("DEEPGRAM_API_KEY", source),
         )
