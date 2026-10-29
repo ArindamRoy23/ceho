@@ -7,54 +7,69 @@ from unittest.mock import patch
 from ceho.hot.config import ConfigurationError, HotServerSettings
 
 
+def _environment(**overrides: str) -> dict[str, str]:
+    values = {
+        "DATABASE_URL": "postgresql://ceho:ceho@localhost/ceho",
+        "CEHO_MEDIA_STORAGE_URI": "s3://ceho-media",
+        "CEHO_S3_ENDPOINT_URL": "http://minio:9000",
+        "CEHO_S3_ACCESS_KEY_ID": "ceho",
+        "CEHO_S3_SECRET_ACCESS_KEY": "ceho-dev-only",
+        "CEHO_S3_REGION": "us-east-1",
+        "CEHO_SIGNALING_SECRET": "test-secret",
+        "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
+    }
+    values.update(overrides)
+    return values
+
+
 class HotServerSettingsTest(unittest.TestCase):
     """Verify required hot-server startup settings."""
 
     def test_missing_required_setting_fails_clearly(self) -> None:
+        environment = _environment()
+        del environment["CEHO_SIGNALING_SECRET"]
+
         with self.assertRaisesRegex(ConfigurationError, "CEHO_SIGNALING_SECRET"):
-            HotServerSettings.from_environment(
-                {
-                    "DATABASE_URL": "postgresql://ceho:ceho@localhost/ceho",
-                    "CEHO_MEDIA_STORAGE_URI": "file:///tmp/ceho-media",
-                    "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
-                }
-            )
+            HotServerSettings.from_environment(environment)
 
     def test_valid_environment_builds_settings(self) -> None:
         settings = HotServerSettings.from_environment(
-            {
-                "DATABASE_URL": "postgresql://ceho:ceho@localhost/ceho",
-                "CEHO_MEDIA_STORAGE_URI": "file:///tmp/ceho-media",
-                "CEHO_SIGNALING_SECRET": "test-secret",
-                "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
-                "CEHO_HOST": "0.0.0.0",
-                "CEHO_PORT": "9000",
-            }
+            _environment(CEHO_HOST="0.0.0.0", CEHO_PORT="9000")
         )
 
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 9000)
+        self.assertEqual(settings.media_storage_uri, "s3://ceho-media")
+        self.assertEqual(settings.s3_endpoint_url, "http://minio:9000")
+        self.assertTrue(settings.s3_use_path_style)
+
+    def test_media_storage_must_be_an_s3_bucket_uri(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "CEHO_MEDIA_STORAGE_URI"):
+            HotServerSettings.from_environment(
+                _environment(CEHO_MEDIA_STORAGE_URI="file:///tmp/ceho-media")
+            )
+
+    def test_unset_s3_endpoint_uses_cloud_addressing(self) -> None:
+        environment = _environment()
+        del environment["CEHO_S3_ENDPOINT_URL"]
+
+        settings = HotServerSettings.from_environment(environment)
+
+        self.assertIsNone(settings.s3_endpoint_url)
+        self.assertFalse(settings.s3_use_path_style)
 
     def test_explicit_mapping_does_not_load_dotenv(self) -> None:
         with patch("ceho.hot.config.load_dotenv") as load_dotenv:
             with self.assertRaisesRegex(ConfigurationError, "CEHO_SIGNALING_SECRET"):
-                HotServerSettings.from_environment(
-                    {
-                        "DATABASE_URL": "postgresql://ceho:ceho@localhost/ceho",
-                        "CEHO_MEDIA_STORAGE_URI": "file:///tmp/ceho-media",
-                        "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
-                    }
-                )
+                environment = _environment()
+                del environment["CEHO_SIGNALING_SECRET"]
+                HotServerSettings.from_environment(environment)
 
         load_dotenv.assert_not_called()
 
     def test_process_environment_loads_dotenv(self) -> None:
-        values = {
-            "DATABASE_URL": "postgresql://ceho:ceho@localhost/ceho",
-            "CEHO_MEDIA_STORAGE_URI": "file:///tmp/ceho-media",
-            "CEHO_SIGNALING_SECRET": "from-dotenv",
-            "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
-        }
+        values = _environment(CEHO_SIGNALING_SECRET="from-dotenv")
+        del values["CEHO_S3_ENDPOINT_URL"]
 
         def fill_environment() -> bool:
             os.environ.update(values)

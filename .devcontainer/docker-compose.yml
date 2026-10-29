@@ -1,6 +1,6 @@
-# Local development only. PostgreSQL is a provisional choice and is not the
-# finalized CEHO data stack. Vector store, cache, and queue are intentionally
-# absent until the design discussion.
+# Local development only. PostgreSQL is a provisional database. MinIO is the
+# local S3 API for media objects; cloud deployment uses the same bucket URI
+# with CEHO_S3_ENDPOINT_URL unset. Vector store, cache, and queue are absent.
 services:
   app:
     build:
@@ -14,6 +14,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://ceho:ceho@postgres:5432/ceho}
       UV_PROJECT_ENVIRONMENT: /home/vscode/.venv
@@ -39,5 +41,45 @@ services:
       timeout: 5s
       retries: 10
 
+  # Community minio/minio images are no longer published. This Chainguard
+  # image is the MinIO server binary. It has no shell, so the bucket is
+  # created by minio-init. Root owns the named volume; this service is local only.
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    user: "0:0"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-ceho}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ceho-dev-only}
+    ports:
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+
+  # The dev client image has a shell so this can wait until MinIO accepts
+  # connections, then create the bucket once.
+  minio-init:
+    image: cgr.dev/chainguard/minio-client:latest-dev
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MC_HOST_ceho: http://${MINIO_ROOT_USER:-ceho}:${MINIO_ROOT_PASSWORD:-ceho-dev-only}@minio:9000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        i=0
+        until mc mb --ignore-existing ceho/${MINIO_BUCKET:-ceho-media}; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 30 ]; then
+            exit 1
+          fi
+          sleep 1
+        done
+    restart: "no"
+
 volumes:
   postgres-data:
+  minio-data:

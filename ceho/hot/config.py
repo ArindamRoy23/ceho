@@ -29,6 +29,31 @@ def _url_value(name: str, environment: Mapping[str, str]) -> str:
     return value
 
 
+def _s3_uri(name: str, environment: Mapping[str, str]) -> str:
+    value = _required_value(name, environment)
+    parsed = urlparse(value)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise ConfigurationError(f"{name} must be an s3://bucket URI")
+    return value
+
+
+def _optional_http_url(name: str, environment: Mapping[str, str]) -> str | None:
+    value = environment.get(name, "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigurationError(f"{name} must be an absolute http(s) URI")
+    return value
+
+
+def _region_value(environment: Mapping[str, str]) -> str:
+    value = environment.get("CEHO_S3_REGION", "us-east-1").strip()
+    if not value:
+        raise ConfigurationError("CEHO_S3_REGION must be configured")
+    return value
+
+
 def _port_value(environment: Mapping[str, str]) -> int:
     value = environment.get("CEHO_PORT", "8000")
     try:
@@ -46,10 +71,19 @@ class HotServerSettings:
 
     database_url: str
     media_storage_uri: str
+    s3_endpoint_url: str | None
+    s3_access_key_id: str
+    s3_secret_access_key: str
+    s3_region: str
     signaling_secret: str
     event_publisher_url: str
     host: str
     port: int
+
+    @property
+    def s3_use_path_style(self) -> bool:
+        """Custom endpoints, including local MinIO, use path-style S3 addressing."""
+        return self.s3_endpoint_url is not None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> HotServerSettings:
@@ -66,7 +100,11 @@ class HotServerSettings:
             source = environment
         return cls(
             database_url=_url_value("DATABASE_URL", source),
-            media_storage_uri=_url_value("CEHO_MEDIA_STORAGE_URI", source),
+            media_storage_uri=_s3_uri("CEHO_MEDIA_STORAGE_URI", source),
+            s3_endpoint_url=_optional_http_url("CEHO_S3_ENDPOINT_URL", source),
+            s3_access_key_id=_required_value("CEHO_S3_ACCESS_KEY_ID", source),
+            s3_secret_access_key=_required_value("CEHO_S3_SECRET_ACCESS_KEY", source),
+            s3_region=_region_value(source),
             signaling_secret=_required_value("CEHO_SIGNALING_SECRET", source),
             event_publisher_url=_url_value("CEHO_EVENT_PUBLISHER_URL", source),
             host=source.get("CEHO_HOST", "127.0.0.1"),
