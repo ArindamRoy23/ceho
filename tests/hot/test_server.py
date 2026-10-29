@@ -15,7 +15,11 @@ class HotServerApplicationTest(unittest.TestCase):
     def test_health_endpoint_reports_ready(self) -> None:
         settings = HotServerSettings(
             database_url="postgresql://ceho:ceho@localhost/ceho",
-            media_storage_uri="file:///tmp/ceho-media",
+            media_storage_uri="s3://ceho-media",
+            s3_endpoint_url="http://minio:9000",
+            s3_access_key_id="ceho",
+            s3_secret_access_key="ceho-dev-only",
+            s3_region="us-east-1",
             signaling_secret="test-secret",
             event_publisher_url="memory://ceho",
             host="127.0.0.1",
@@ -35,7 +39,11 @@ class HotServerMainTest(unittest.TestCase):
     def test_main_runs_with_environment_settings(self) -> None:
         settings = HotServerSettings(
             database_url="postgresql://ceho:ceho@localhost/ceho",
-            media_storage_uri="file:///tmp/ceho-media",
+            media_storage_uri="s3://ceho-media",
+            s3_endpoint_url="http://minio:9000",
+            s3_access_key_id="ceho",
+            s3_secret_access_key="ceho-dev-only",
+            s3_region="us-east-1",
             signaling_secret="test-secret",
             event_publisher_url="memory://ceho",
             host="127.0.0.1",

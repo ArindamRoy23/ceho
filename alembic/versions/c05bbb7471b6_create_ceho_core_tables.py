@@ -223,7 +223,16 @@ def upgrade() -> None:
         schema="ceho_core",
     )
     # ### end Alembic commands ###
-    for statement in updated_at_trigger_statements():
+    for statement in updated_at_trigger_statements(
+        (
+            "tenants",
+            "channels",
+            "users",
+            "sessions",
+            "session_users",
+            "transcripts",
+        )
+    ):
         op.execute(statement)
 
 

@@ -52,6 +52,11 @@ Add or update a functional page in the pull request that makes the behavior true
 
 `docs/technical/` describes how that behavior is built: design, contracts, and decisions, grouped by capability.
 
+Keep all implementation detail in
+`docs/technical/architecture/low-level-design.md`. Do not add companion
+architecture pages for schema or process slices; split later only when asked.
+`local-development.md` stays limited to the local environment.
+
 A technical page can land before any functional page, because a contract or a decision is needed before users see the behavior. Cite the issue the page satisfies. Leave the user-facing promise in the issue and, once met, in the functional page.
 
 ```text
