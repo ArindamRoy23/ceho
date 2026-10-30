@@ -222,7 +222,7 @@ The pipeline does not write the database or publish events. It hands final candi
 
 ### Initial graph — provisional
 
-The current hypothesis is:
+The longer-term hypothesis is still:
 
 ```text
 audio source
@@ -233,11 +233,21 @@ audio source
   -> final transcript candidate
 ```
 
-Pipecat capabilities, streaming-provider behavior, measured latency, and quality evaluation can change the order or combine stages. A change must preserve the stable contract above.
+Pipecat capabilities, streaming-provider behavior, measured latency, and quality evaluation can change the order or combine stages. A change must preserve the stable contract above. The graph that is built now is the [direct-source STT run](#direct-source-stt-run).
+
+### Direct-source STT run
+
+`DirectSourceRun` supervises one Pipecat task for one direct source. Callers push ordered PCM in the format of `DirectSourcePipelineConfig` in `ceho.hot.config`: 16 kHz, 16-bit, mono, with the provider-failure bound on that same type. That type is separate from `HotServerSettings`, which holds process and environment settings. The processors in front of the candidate sink are injected, so a later VAD stage or a different STT service can be inserted without changing the candidate type. The live list is one Deepgram speech-to-text processor. There is no voice activity detector, diarization, language model, speech synthesizer, or talkback output. Pipecat RTVI and turn tracking are off.
+
+`DEEPGRAM_API_KEY` is not required to start the hot server. It is required only when that Deepgram processor is constructed. `python -m tests.hot.transcribe RECORDING.wav` is a test harness that sends one prerecorded file through this run and prints candidates. It does not write the database.
+
+A final provider result becomes a `TranscriptCandidate` when the trimmed text is non-empty. The candidate carries the direct-source context, including the expected session-user membership, plus the session-timeline start and end in milliseconds. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, and text is kept once.
+
+Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller holds the candidates until the transcript transaction exists.
 
 ### Speaker handling
 
-For a direct authenticated source, the server has a strong candidate for the originating session user. The pipeline still creates or uses a local session speaker for durable attribution.
+For a direct authenticated source, the server has a strong candidate for the originating session user. The pipeline still creates or uses a local session speaker for durable attribution. The direct-source STT run does not create `session_speakers` yet. It carries the expected session user on the candidate for that later attribution step.
 
 For a mixed source, diarization produces one or more local speakers. They have no session-user mapping until a separate, confirmable operation occurs. User recognition and cross-session voice recognition are not part of this pipeline.
 
@@ -501,6 +511,8 @@ and exposes `GET /health`. Startup validates `DATABASE_URL`,
 `CEHO_S3_SECRET_ACCESS_KEY`, `CEHO_S3_REGION` (default `us-east-1`),
 `CEHO_SIGNALING_SECRET`, and `CEHO_EVENT_PUBLISHER_URL`.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
+`DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
+present and used only to construct the direct-source Deepgram STT processor.
 The in-memory publisher is a development placeholder. This foundation does not
 record audio or publish events yet. Package layout for later hot-path modules
 is under [Target package structure](#target-package-structure).
@@ -512,7 +524,7 @@ is under [Target package structure](#target-package-structure).
 3. Implement the transport port and WebRTC adapter.
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
 5. Implement recording to durable shared/object storage.
-6. Build a minimal Pipecat spike that emits final candidates from one source.
+6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. Persistence is still step 7.
 7. Implement transcript transactions and the outbox publisher.
 8. Validate direct-source attribution, then diarization for mixed sources.
 9. Add observability and staged load tests before estimating capacity.
@@ -522,7 +534,7 @@ is under [Target package structure](#target-package-structure).
 
 ## Open decisions
 
-- The exact Pipecat processor graph and provider integrations.
+- The first direct-source graph is Deepgram STT with no VAD, diarization, LLM, or talkback. Whether later sources insert VAD, and which Deepgram model stays configured, remain open. The candidate contract stays fixed.
 - Whether diarization runs for every direct source or only channels that may mix speakers. -- Later feature Idea
 - Initial codec, frame duration, timestamp conversion, and maximum sources per session.
 - The recording-failure policy.

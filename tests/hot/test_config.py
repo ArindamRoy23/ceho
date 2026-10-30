@@ -4,7 +4,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from ceho.hot.config import ConfigurationError, HotServerSettings
+from ceho.hot.config import (
+    DIRECT_SOURCE_PIPELINE,
+    ConfigurationError,
+    DirectSourcePipelineConfig,
+    HotServerSettings,
+)
 
 
 def _environment(**overrides: str) -> dict[str, str]:
@@ -57,6 +62,31 @@ class HotServerSettingsTest(unittest.TestCase):
 
         self.assertIsNone(settings.s3_endpoint_url)
         self.assertFalse(settings.s3_use_path_style)
+
+    def test_direct_source_pipeline_config_is_separate_from_process_settings(self) -> None:
+        audio = DirectSourcePipelineConfig()
+
+        self.assertEqual(audio.sample_rate, 16_000)
+        self.assertEqual(audio.sample_width, 2)
+        self.assertEqual(audio.channels, 1)
+        self.assertEqual(audio.max_provider_failures, 3)
+        self.assertEqual(audio.frame_bytes(20), 640)
+        self.assertEqual(DIRECT_SOURCE_PIPELINE, audio)
+
+    def test_deepgram_api_key_is_optional(self) -> None:
+        settings = HotServerSettings.from_environment(_environment())
+
+        self.assertIsNone(settings.deepgram_api_key)
+
+    def test_deepgram_api_key_is_read_when_present(self) -> None:
+        settings = HotServerSettings.from_environment(_environment(DEEPGRAM_API_KEY="test-key"))
+
+        self.assertEqual(settings.deepgram_api_key, "test-key")
+
+    def test_blank_deepgram_api_key_is_absent(self) -> None:
+        settings = HotServerSettings.from_environment(_environment(DEEPGRAM_API_KEY="  "))
+
+        self.assertIsNone(settings.deepgram_api_key)
 
     def test_explicit_mapping_does_not_load_dotenv(self) -> None:
         with patch("ceho.hot.config.load_dotenv") as load_dotenv:
