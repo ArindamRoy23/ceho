@@ -38,11 +38,12 @@ other client relavant event driven feature:: Marketplace sellable, listner adapt
 
 I have to store data regarding the following entities:
 1. users
-2. session_users
-3. sessions
-4. transcripts (has vectors)
-5. projects
-6. Memories (has vectors, hierarchical sometimes)
+2. speakers
+3. session_speakers
+4. sessions
+5. transcripts (has vectors)
+6. projects
+7. Memories (has vectors, hierarchical sometimes)
 
 
 Tech Stack: 
@@ -96,9 +97,10 @@ to think
 
 ### Postgres Entities:
 1. sessions:: This is the unique sessions. 
-2. session_users:: This is the users in a session.
+2. session_speakers:: This is the voices in a session.
 3. transcripts:: This is the transcripts of the sessions.
-4. users:: This is the users of the system.
+4. users:: This is the platform accounts.
+5. speakers:: This is a voice that can be attributed.
 
 ### PG message queue events:
 1. Session created

@@ -5,33 +5,73 @@ import unittest
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Table, UniqueConstraint
 from sqlalchemy.sql import FromClause
 
-from ceho.models import MediaObject, OutboxEvent, SessionUser, Transcript, User
+from ceho.models import (
+    MediaObject,
+    OutboxEvent,
+    SessionSpeaker,
+    Speaker,
+    Transcript,
+    User,
+)
 
 
 class HotPathSchemaTest(unittest.TestCase):
-    """Verify membership, media provenance, and outbox constraints on the models."""
+    """Verify user, speaker, media provenance, and outbox constraints on the models."""
 
-    def test_users_store_external_ids_as_json_object_with_gin_index(self) -> None:
+    def test_platform_users_store_login_identity_without_a_password(self) -> None:
         users = _as_table(User.__table__)
         index_names = {index.name for index in users.indexes}
 
         self.assertNotIn("external_id", users.c)
+        self.assertNotIn("password", users.c)
+        self.assertNotIn("password_hash", users.c)
         self.assertIn("external_ids", users.c)
         self.assertFalse(users.c.external_ids.nullable)
         self.assertIn("users_external_ids_object_check", _check_names(users))
         self.assertIn("users_external_ids_gin_idx", index_names)
 
-    def test_known_user_membership_is_unique_and_anonymous_user_stays_nullable(self) -> None:
-        constraint = _unique(
-            _as_table(SessionUser.__table__),
-            "session_users_tenant_session_user_unique",
+    def test_speaker_link_to_a_platform_user_is_optional_and_cleared_on_delete(self) -> None:
+        speakers = _as_table(Speaker.__table__)
+        foreign_key = _foreign_key(speakers, "speakers_tenant_user_fkey")
+
+        self.assertEqual(
+            [column.name for column in foreign_key.columns],
+            ["tenant_id", "user_id"],
         )
+        self.assertEqual(foreign_key.ondelete, "SET NULL (user_id)")
+        self.assertTrue(speakers.c.user_id.nullable)
+        self.assertIn("speakers_external_ids_gin_idx", {index.name for index in speakers.indexes})
+
+    def test_known_session_speaker_is_unique_and_unlinked_speaker_stays_nullable(self) -> None:
+        session_speakers = _as_table(SessionSpeaker.__table__)
+        constraint = _unique(session_speakers, "session_speakers_known_speaker_unique")
+        foreign_key = _foreign_key(session_speakers, "session_speakers_tenant_speaker_fkey")
 
         self.assertEqual(
             [column.name for column in constraint.columns],
-            ["tenant_id", "session_id", "user_id"],
+            ["tenant_id", "session_id", "speaker_id"],
         )
-        self.assertTrue(SessionUser.__table__.c.user_id.nullable)
+        self.assertEqual(foreign_key.ondelete, "SET NULL (speaker_id)")
+        self.assertTrue(session_speakers.c.speaker_id.nullable)
+        self.assertTrue(session_speakers.c.label.nullable)
+        self.assertIn("session_speakers_label_check", _check_names(session_speakers))
+        label = _unique(session_speakers, "session_speakers_label_unique")
+        self.assertEqual(
+            [column.name for column in label.columns],
+            ["tenant_id", "session_id", "label"],
+        )
+
+    def test_transcript_attributes_a_session_speaker(self) -> None:
+        transcripts = _as_table(Transcript.__table__)
+        foreign_key = _foreign_key(transcripts, "transcripts_speaker_fkey")
+
+        self.assertEqual(
+            [column.name for column in foreign_key.columns],
+            ["tenant_id", "session_id", "session_speaker_id"],
+        )
+        self.assertEqual(foreign_key.ondelete, "CASCADE")
+        self.assertFalse(transcripts.c.session_speaker_id.nullable)
+        self.assertNotIn("session_user_id", transcripts.c)
 
     def test_media_object_is_tenant_and_session_scoped(self) -> None:
         foreign_key = _foreign_key(

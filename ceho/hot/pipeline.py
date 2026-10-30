@@ -54,16 +54,16 @@ class RunState(Enum):
 
 @dataclass(frozen=True)
 class DirectSourceContext:
-    """Session and membership a direct source is allowed to attribute.
+    """Session and voice a direct source is allowed to attribute.
 
-    ``session_user_id`` is the expected membership for this source. It is not
-    a diarized speaker and it is not proof that nobody else used the microphone.
+    ``session_speaker_id`` is the expected session speaker for this source. It
+    is not a platform user and it is not proof that nobody else used the microphone.
     """
 
     tenant_id: int
     session_id: int
     source_id: str
-    session_user_id: int | None
+    session_speaker_id: int | None
 
 
 @dataclass(frozen=True)

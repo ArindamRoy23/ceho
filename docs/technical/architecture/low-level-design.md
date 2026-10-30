@@ -40,9 +40,13 @@ A **session** is the durable, tenant-scoped logical interaction represented by `
 
 For the current product, a session is the durable conversation unit. A reconnect does not create a new session.
 
-### Session user
+### User
 
-A **session user** is a known CEHO user who has joined a session. It represents membership, not an observed voice or a live connection. A user can reconnect and reuse the same session-user row. A silent user remains a member.
+A **user** is a platform login account in `ceho_core.users`. It belongs to one tenant. A connection does not create a user, and this table does not store a password. Login and OAuth resolve to this row later. `external_ids` holds provider subjects.
+
+### Speaker
+
+A **speaker** is a voice that can be attributed, stored in `ceho_core.speakers`. It belongs to one tenant and keeps channel identifiers in `external_ids`. `user_id` is optional. When a person confirms that a voice is their account, the speaker points at that user. Deleting the user clears the link and leaves the speaker.
 
 ### Peer
 
@@ -60,7 +64,7 @@ A transport peer can carry multiple audio sources, and an audio source can conta
 
 ### Session speaker
 
-A **session speaker** is a local, session-scoped voice label produced by the pipeline, such as `speaker_1`. It is the attribution target for a transcript. It can later be associated with a session user but must not be inferred from the transport connection alone.
+A **session speaker** is one voice inside one session, stored in `ceho_core.session_speakers`. A session, a connection, and a platform user can each involve many session speakers. `speaker_id` is optional, so a voice can be recorded before it is linked to a speaker. `label` is the session-local name, such as `speaker_1`, and is unique within the session when it is set. A transcript attributes a turn to `session_speaker_id`. The label is not inferred from the transport connection alone.
 
 ### Pipeline run
 
@@ -134,7 +138,7 @@ When hot servers scale horizontally, this becomes a per-session ownership guaran
 
 ### Tenant boundary
 
-The authenticated control request determines the tenant. The server never accepts a tenant, session user, or authorization claim from an audio packet.
+The authenticated control request determines the tenant. The server never accepts a tenant, user, speaker, or authorization claim from an audio packet.
 
 Every session lookup, membership lookup, media record, transcript write, and outbox event is constrained by the authenticated tenant and session. Composite foreign keys in `ceho_core` prevent child rows from referencing a parent in another tenant.
 
@@ -145,7 +149,7 @@ An authenticated caller creates a session through the control API:
 1. Authenticate the caller and resolve its tenant.
 2. Authorize the caller to use the requested channel.
 3. Insert an active session with tenant, channel, and `started_at`.
-4. Insert the creator's membership when the caller is a CEHO user.
+4. Leave speaker rows untouched. A session speaker is recorded when a voice is attributed or a person claims it.
 5. Insert `session.created` into the transactional outbox in the same transaction.
 6. Return the session ID and a short-lived credential for signaling or joining.
 
@@ -156,17 +160,17 @@ The control request, not media traffic, creates the durable session row.
 Joining occurs through an authenticated control request:
 
 1. Load the active session and authorize access within the tenant.
-2. Find or create the membership row for `(tenant_id, session_id, user_id)`.
-3. Issue a short-lived, session-bound join credential containing the allowed session, user, channel, and expiry.
+2. Leave speaker rows untouched. Joining does not create a session speaker.
+3. Issue a short-lived, session-bound join credential containing the allowed session, tenant, channel, and expiry.
 4. Perform WebRTC signaling with that credential.
-5. Bind the authenticated peer established by signaling to the session and membership.
+5. Bind the authenticated peer established by signaling to the session.
 6. Start a pipeline run for every input audio source announced by that peer.
 
 The join credential authorizes signaling only. It is not a durable authorization grant or general API credential.
 
 ### Disconnect, reconnect, and end
 
-On peer disconnect, CEHO stops the peer's pipeline runs and closes recording streams. It retains the session and membership rows.
+On peer disconnect, CEHO stops the peer's pipeline runs and closes recording streams. It retains the session and any session-speaker rows.
 
 The same user can repeat the join flow and create a new peer for the same session. A session ends only when:
 
@@ -241,15 +245,15 @@ Pipecat capabilities, streaming-provider behavior, measured latency, and quality
 
 `DEEPGRAM_API_KEY` is not required to start the hot server. It is required only when that Deepgram processor is constructed. `python -m tests.hot.transcribe RECORDING.wav` is a test harness that sends one prerecorded file through this run and prints candidates. It does not write the database.
 
-A final provider result becomes a `TranscriptCandidate` when the trimmed text is non-empty. The candidate carries the direct-source context, including the expected session-user membership, plus the session-timeline start and end in milliseconds. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, and text is kept once.
+A final provider result becomes a `TranscriptCandidate` when the trimmed text is non-empty. The candidate carries the direct-source context, including the expected `session_speaker_id`, plus the session-timeline start and end in milliseconds. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, and text is kept once.
 
 Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller holds the candidates until the transcript transaction exists.
 
 ### Speaker handling
 
-For a direct authenticated source, the server has a strong candidate for the originating session user. The pipeline still creates or uses a local session speaker for durable attribution. The direct-source STT run does not create `session_speakers` yet. It carries the expected session user on the candidate for that later attribution step.
+For a direct authenticated source, the server has a strong candidate for the originating session speaker. The direct-source STT run does not insert `session_speakers` yet. It carries the expected `session_speaker_id` on the candidate for that later attribution step.
 
-For a mixed source, diarization produces one or more local speakers. They have no session-user mapping until a separate, confirmable operation occurs. User recognition and cross-session voice recognition are not part of this pipeline.
+For a mixed source, diarization produces one or more session speakers. Linking a session speaker to a speaker, and a speaker to a platform user, is a separate confirmation. User recognition and cross-session voice recognition are not part of this pipeline.
 
 ### Finalization
 
@@ -276,46 +280,37 @@ shape and the remaining schema work.
 
 Implemented in `ceho_core`:
 
-- `tenants`, `channels`, `users`, `sessions`
-- `session_users` with unique known-user membership
+- `tenants`, `channels`, `users`, `speakers`, `sessions`
+- `session_speakers` with a unique known speaker and a unique label
 - `media_objects`
-- `transcripts` with optional media provenance
+- `transcripts` with `session_speaker_id` and optional media provenance
 - `outbox_events`
 
-Not implemented yet: `session_speakers`, and moving transcript speaker
-attribution from `session_user_id` to `session_speaker_id`.
+Not implemented yet: mapping status and source identity on `session_speakers`.
 
 ### Users
 
-`users.external_ids` is a JSON object of provider or channel names to external
-identifiers. A GIN index supports containment lookups. There is no single-column
-`external_id`.
+`users` is the platform login account. `external_ids` is a JSON object of
+provider names to subjects. A GIN index supports containment lookups. There is
+no password column and no single-column `external_id`.
 
-### Session users
+### Speakers
 
-`session_users` is membership data. `user_id` is nullable. A unique constraint
-on `(tenant_id, session_id, user_id)` stops a known user from joining the same
-session twice. PostgreSQL treats nulls as distinct, so anonymous membership
-rows can repeat.
-
-Do not use a session user as the direct speaker attribute for mixed audio. One
-known user can have several peers over time, and an observed speaker may have
-no known user.
+`speakers` is a voice that can be attributed. `external_ids` holds channel
+identifiers in the same JSON shape. `user_id` is nullable. Deleting the
+platform user sets `user_id` to null and leaves the speaker row.
 
 ### Session speakers
 
-Not implemented. Add `session_speakers` with:
+`session_speakers` is one voice in one session. `speaker_id` is nullable. A
+unique constraint on `(tenant_id, session_id, speaker_id)` stops a known
+speaker from appearing twice in that session. PostgreSQL treats nulls as
+distinct, so unlinked voices can repeat. `label` is null or a non-blank
+session-local name, unique within the session when set.
 
-- stable session-speaker ID;
-- tenant and session foreign keys;
-- local label or provider-local identifier;
-- optional source identity;
-- optional `session_user_id`;
-- mapping status such as unassigned, suggested, confirmed, or rejected; and
-- timestamps.
-
-After that change, transcripts reference `session_speaker_id`, not
-`session_user_id`. A speaker-to-user mapping remains separable and revisable.
+A session speaker is the transcript's speaker attribute. One known speaker can
+have several peers over time, and an observed voice may have no speaker row
+yet. Mapping status and source identity remain open.
 
 ### Media objects
 
@@ -332,7 +327,7 @@ decision below.
 ### Transcripts
 
 Final text, session-timeline timestamps, and `turn_index` are stored. The
-current speaker attribute is still `session_user_id`. A transcript may also
+speaker attribute is `session_speaker_id`. A transcript may also
 reference one media object in the same tenant and session, with
 `media_start_offset_ms` and `media_end_offset_ms`. The reference and both
 offsets are all present or all absent. Deleting the media row is restricted
@@ -520,7 +515,7 @@ is under [Target package structure](#target-package-structure).
 ## Implementation sequence
 
 1. Define the control API and authentication/join-credential contract.
-2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema; speakers remain open.
+2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
 3. Implement the transport port and WebRTC adapter.
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
 5. Implement recording to durable shared/object storage.
