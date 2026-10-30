@@ -42,7 +42,7 @@ For the current product, a session is the durable conversation unit. A reconnect
 
 ### User
 
-A **user** is a platform login account in `ceho_core.users`. It belongs to one tenant. A connection does not create a user, and this table does not store a password. Login and OAuth resolve to this row later. `external_ids` holds provider subjects.
+A **user** is a platform login account in `ceho_core.users`. It belongs to one tenant. A connection does not create a user. A local password is stored only as an Argon2id hash. An OAuth login leaves that hash empty and records the provider subject in `external_ids`.
 
 ### Speaker
 
@@ -290,9 +290,18 @@ Not implemented yet: mapping status and source identity on `session_speakers`.
 
 ### Users
 
-`users` is the platform login account. `external_ids` is a JSON object of
-provider names to subjects. A GIN index supports containment lookups. There is
-no password column and no single-column `external_id`.
+`users` is the platform login account. `password_hash` is null or an Argon2id
+encoded hash, which begins with `$argon2id$` and already carries the salt and
+parameters. The plaintext password is not stored. An account that signs in
+only through an identity provider leaves `password_hash` null.
+
+`external_ids` is a JSON object of provider names to subjects. A GIN index
+supports containment lookups. There is no single-column `external_id`. OAuth
+does not write a password. After the provider accepts the person, the host
+finds or creates the user in the tenant where the login started, matching
+that provider and subject, then mints the client token. A person can have a
+password hash and several provider subjects on the same row. Provider access
+tokens and refresh tokens are not stored here.
 
 ### Speakers
 

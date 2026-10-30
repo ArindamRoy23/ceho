@@ -18,17 +18,19 @@ from ceho.models import (
 class HotPathSchemaTest(unittest.TestCase):
     """Verify user, speaker, media provenance, and outbox constraints on the models."""
 
-    def test_platform_users_store_login_identity_without_a_password(self) -> None:
+    def test_platform_user_password_is_an_optional_argon2id_hash(self) -> None:
         users = _as_table(User.__table__)
-        index_names = {index.name for index in users.indexes}
+        password_hash = _check(users, "users_password_hash_check")
 
-        self.assertNotIn("external_id", users.c)
         self.assertNotIn("password", users.c)
-        self.assertNotIn("password_hash", users.c)
+        self.assertNotIn("external_id", users.c)
+        self.assertIn("password_hash", users.c)
+        self.assertTrue(users.c.password_hash.nullable)
+        self.assertIn("$argon2id$", str(password_hash.sqltext))
         self.assertIn("external_ids", users.c)
         self.assertFalse(users.c.external_ids.nullable)
         self.assertIn("users_external_ids_object_check", _check_names(users))
-        self.assertIn("users_external_ids_gin_idx", index_names)
+        self.assertIn("users_external_ids_gin_idx", {index.name for index in users.indexes})
 
     def test_speaker_link_to_a_platform_user_is_optional_and_cleared_on_delete(self) -> None:
         speakers = _as_table(Speaker.__table__)
@@ -149,6 +151,20 @@ def _foreign_key(table: Table, name: str) -> ForeignKeyConstraint:
             constraint
             for constraint in table.constraints
             if isinstance(constraint, ForeignKeyConstraint) and constraint.name == name
+        ),
+        None,
+    )
+    if found is None:
+        raise AssertionError(f"{name} is missing")
+    return found
+
+
+def _check(table: Table, name: str) -> CheckConstraint:
+    found = next(
+        (
+            constraint
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name == name
         ),
         None,
     )

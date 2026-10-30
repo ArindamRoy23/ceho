@@ -152,10 +152,14 @@ class Channel(Timestamped, Base):
 
 
 class User(Timestamped, Base):
-    """Platform login account. Authentication secrets stay out of this table."""
+    """Platform login account. Local passwords are stored as an Argon2id hash."""
 
     __tablename__ = "users"
     __table_args__ = (
+        CheckConstraint(
+            "password_hash IS NULL OR password_hash LIKE '$argon2id$%'",
+            name="users_password_hash_check",
+        ),
         CheckConstraint(
             "jsonb_typeof(external_ids) = 'object'",
             name="users_external_ids_object_check",
@@ -173,6 +177,7 @@ class User(Timestamped, Base):
     user_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text)
     external_ids: Mapped[dict[str, object]] = mapped_column(
         JSONB,
         nullable=False,
