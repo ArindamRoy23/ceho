@@ -9,6 +9,11 @@ channels is that catalog (WebRTC, Slack, Teams, and so on): a session may use
 a channel owned by its own tenant or by the generic tenant. A channel owned
 by any other tenant stays private to that tenant.
 
+A user is a platform login account. A speaker is a voice that can be
+attributed and may point at one user after that person confirms it. A session
+speaker is one voice inside one session. A connection, a user, and a session
+can each have many session speakers.
+
 Transcript identity is (session_id, turn_index). turn_index repeats in every
 session, so it cannot be a primary key by itself. A transcript may also name
 the media object and millisecond interval that support that turn.
@@ -147,8 +152,14 @@ class Channel(Timestamped, Base):
 
 
 class User(Timestamped, Base):
+    """Platform login account. Local passwords are stored as an Argon2id hash."""
+
     __tablename__ = "users"
     __table_args__ = (
+        CheckConstraint(
+            "password_hash IS NULL OR password_hash LIKE '$argon2id$%'",
+            name="users_password_hash_check",
+        ),
         CheckConstraint(
             "jsonb_typeof(external_ids) = 'object'",
             name="users_external_ids_object_check",
@@ -159,11 +170,48 @@ class User(Timestamped, Base):
             name="users_tenant_id_fkey",
         ),
         UniqueConstraint("tenant_id", "user_id", name="users_tenant_user_unique"),
-        # GIN supports containment lookups such as provider -> id.
+        # GIN supports containment lookups such as provider -> subject.
         Index("users_external_ids_gin_idx", "external_ids", postgresql_using="gin"),
     )
 
     user_id: Mapped[int] = _identity()
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    external_ids: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+
+
+class Speaker(Timestamped, Base):
+    """A voice that can be attributed, optionally confirmed as one platform user."""
+
+    __tablename__ = "speakers"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(external_ids) = 'object'",
+            name="speakers_external_ids_object_check",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            [f"{SCHEMA}.tenants.tenant_id"],
+            name="speakers_tenant_id_fkey",
+        ),
+        # SET NULL (user_id) drops the account link and leaves the voice in place.
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            [f"{SCHEMA}.users.tenant_id", f"{SCHEMA}.users.user_id"],
+            name="speakers_tenant_user_fkey",
+            ondelete="SET NULL (user_id)",
+        ),
+        UniqueConstraint("tenant_id", "speaker_id", name="speakers_tenant_speaker_unique"),
+        Index("speakers_external_ids_gin_idx", "external_ids", postgresql_using="gin"),
+        Index("speakers_user_id_idx", "user_id"),
+    )
+
+    speaker_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     external_ids: Mapped[dict[str, object]] = mapped_column(
@@ -171,6 +219,7 @@ class User(Timestamped, Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
     )
+    user_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class Session(Timestamped, Base):
@@ -211,43 +260,57 @@ class Session(Timestamped, Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class SessionUser(Timestamped, Base):
-    __tablename__ = "session_users"
+class SessionSpeaker(Timestamped, Base):
+    """One voice inside one session. Several can share a connection or a user."""
+
+    __tablename__ = "session_speakers"
     __table_args__ = (
+        CheckConstraint(
+            "label IS NULL OR btrim(label) <> ''",
+            name="session_speakers_label_check",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "session_id"],
             [f"{SCHEMA}.sessions.tenant_id", f"{SCHEMA}.sessions.session_id"],
-            name="session_users_tenant_session_fkey",
+            name="session_speakers_tenant_session_fkey",
             ondelete="CASCADE",
         ),
-        # SET NULL (user_id) drops the speaker link and leaves tenant_id in place.
+        # SET NULL (speaker_id) drops the voice link and leaves the session row.
         ForeignKeyConstraint(
-            ["tenant_id", "user_id"],
-            [f"{SCHEMA}.users.tenant_id", f"{SCHEMA}.users.user_id"],
-            name="session_users_tenant_user_fkey",
-            ondelete="SET NULL (user_id)",
+            ["tenant_id", "speaker_id"],
+            [f"{SCHEMA}.speakers.tenant_id", f"{SCHEMA}.speakers.speaker_id"],
+            name="session_speakers_tenant_speaker_fkey",
+            ondelete="SET NULL (speaker_id)",
         ),
         UniqueConstraint(
             "tenant_id",
             "session_id",
-            "session_user_id",
-            name="session_users_tenant_session_speaker_unique",
+            "session_speaker_id",
+            name="session_speakers_tenant_session_speaker_unique",
         ),
-        # Known users are unique in a session. PostgreSQL treats null user_id
-        # values as distinct, so anonymous membership rows can repeat.
+        # A known speaker joins a session once. PostgreSQL treats null
+        # speaker_id values as distinct, so unlinked voices can repeat.
         UniqueConstraint(
             "tenant_id",
             "session_id",
-            "user_id",
-            name="session_users_tenant_session_user_unique",
+            "speaker_id",
+            name="session_speakers_known_speaker_unique",
         ),
-        Index("session_users_user_id_idx", "user_id"),
+        # A session-local label such as speaker_1 is used once. Null labels repeat.
+        UniqueConstraint(
+            "tenant_id",
+            "session_id",
+            "label",
+            name="session_speakers_label_unique",
+        ),
+        Index("session_speakers_speaker_id_idx", "speaker_id"),
     )
 
-    session_user_id: Mapped[int] = _identity()
+    session_speaker_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     session_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    user_id: Mapped[int | None] = mapped_column(BigInteger)
+    speaker_id: Mapped[int | None] = mapped_column(BigInteger)
+    label: Mapped[str | None] = mapped_column(Text)
 
 
 class Transcript(Timestamped, Base):
@@ -262,11 +325,11 @@ class Transcript(Timestamped, Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["tenant_id", "session_id", "session_user_id"],
+            ["tenant_id", "session_id", "session_speaker_id"],
             [
-                f"{SCHEMA}.session_users.tenant_id",
-                f"{SCHEMA}.session_users.session_id",
-                f"{SCHEMA}.session_users.session_user_id",
+                f"{SCHEMA}.session_speakers.tenant_id",
+                f"{SCHEMA}.session_speakers.session_id",
+                f"{SCHEMA}.session_speakers.session_speaker_id",
             ],
             name="transcripts_speaker_fkey",
             ondelete="CASCADE",
@@ -289,13 +352,13 @@ class Transcript(Timestamped, Base):
             name="transcripts_media_object_fkey",
             ondelete="RESTRICT",
         ),
-        Index("transcripts_session_user_id_idx", "session_id", "session_user_id"),
+        Index("transcripts_session_speaker_id_idx", "session_id", "session_speaker_id"),
     )
 
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     session_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     turn_index: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    session_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    session_speaker_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)

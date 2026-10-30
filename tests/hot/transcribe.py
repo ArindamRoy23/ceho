@@ -69,7 +69,7 @@ async def transcribe_wav(
         tenant_id=1,
         session_id=0,
         source_id=path.name,
-        session_user_id=None,
+        session_speaker_id=None,
     )
     stt = deepgram_stt(api_key)
     run = DirectSourceRun(source, [stt])

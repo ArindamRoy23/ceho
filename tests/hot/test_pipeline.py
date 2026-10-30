@@ -30,7 +30,7 @@ def _context() -> DirectSourceContext:
         tenant_id=1,
         session_id=10,
         source_id="mic",
-        session_user_id=7,
+        session_speaker_id=7,
     )
 
 
@@ -183,7 +183,7 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate.text, "hello")
         self.assertEqual(candidate.start_ms, 1500)
         self.assertEqual(candidate.end_ms, 1900)
-        self.assertEqual(candidate.context.session_user_id, 7)
+        self.assertEqual(candidate.context.session_speaker_id, 7)
         self.assertIs(candidate.context, run.context)
         self.assertFalse(stopped.ends_session)
         self.assertIs(stopped.state, RunState.STOPPED)
