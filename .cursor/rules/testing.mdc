@@ -1,0 +1,51 @@
+---
+description: When to write tests and how to keep the tests/ tree structured
+alwaysApply: true
+---
+
+# Testing
+
+## Workflow (fail first)
+
+- Write tests before the code. List every failure case you can think of first, then see each one fail (red) before making it pass (green).
+- Failure cases to cover: invalid or empty input, boundaries, missing or bad config, upstream errors and timeouts, partial failures, and state-transition violations.
+- A bug fix starts with a test that fails without the fix.
+
+## When to write tests
+
+- Every behavior change ships with tests in the same PR.
+- Test the contract a caller depends on: inputs, outputs, errors, emitted frames or events, state transitions. Do not test private helpers or pin implementation details.
+- A model change gets a metadata test for what the Alembic revision must carry: composite foreign keys, check and unique constraints, indexes.
+- Each required setting gets a test for its default and its clear failure message.
+- Pure refactors, dependency bumps, and docs-only changes need no new tests; existing tests must pass unchanged.
+
+## Structure
+
+- Use `pytest`. Plain functions and `assert`; no `unittest.TestCase`.
+- Mirror the package layout: `ceho/hot/pipeline.py` is tested in `tests/hot/test_pipeline.py`.
+- Name tests after the behavior: `test_missing_required_setting_fails_clearly`. One behavior per test, arranged as arrange, act, assert.
+- Use `@pytest.mark.parametrize` for input variations and `pytest.raises(..., match=...)` for errors.
+- Annotate tests (`-> None`); ruff and mypy check them like other code.
+- Manual harnesses that hit real services (e.g. `tests/hot/transcribe.py`) must not use the `test_` prefix.
+
+## Fixtures
+
+- Shared fixtures and fakes live in `conftest.py`, at the lowest directory that needs them. Keep a one-off helper in its test module until a second module needs it.
+- Root `tests/conftest.py` has autouse fixtures that clear env vars and block network access, so a test cannot read `.env` or call out by accident.
+- Prefer built-ins: `tmp_path`, `monkeypatch`, `caplog`, `capsys`. Builders are factory fixtures (`make_settings(**overrides)`).
+- Keep fixtures function-scoped unless setup is expensive and the object is immutable. Avoid hidden magic: a test should be readable from its signature.
+
+## Isolation
+
+- Unit tests run offline: no Deepgram, S3, Postgres, or network. Pass explicit settings or use `monkeypatch.setenv`.
+- Fake at the boundary (transport, STT, storage, DB session). Do not mock the code under test.
+- Generate audio and other data in the test; no fixture files over a few KB.
+- Async tests use `pytest-asyncio`. No real sleeps or wall-clock timing.
+
+## Running
+
+```bash
+uv run pytest
+```
+
+Run the full suite before finishing and before opening a PR, plus the checks in the type-and-lint rule.
