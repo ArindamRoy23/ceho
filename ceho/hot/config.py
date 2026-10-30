@@ -75,6 +75,22 @@ def _port_value(environment: Mapping[str, str]) -> int:
     return port
 
 
+def _positive_int(name: str, environment: Mapping[str, str], default: int) -> int:
+    raw = environment.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        raise ConfigurationError(f"{name} must be a positive integer")
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be a positive integer") from error
+    if number < 1:
+        raise ConfigurationError(f"{name} must be a positive integer")
+    return number
+
+
 @dataclass(frozen=True)
 class DirectSourcePipelineConfig:
     """PCM format and provider-failure bound for one direct-source STT run."""
@@ -106,6 +122,8 @@ class HotServerSettings:
     event_publisher_url: str
     host: str
     port: int
+    signaling_token_ttl_seconds: int = 60
+    session_idle_timeout_seconds: int = 900
     deepgram_api_key: str | None = None
 
     @property
@@ -137,5 +155,7 @@ class HotServerSettings:
             event_publisher_url=_url_value("CEHO_EVENT_PUBLISHER_URL", source),
             host=source.get("CEHO_HOST", "127.0.0.1"),
             port=_port_value(source),
+            signaling_token_ttl_seconds=_positive_int("CEHO_SIGNALING_TOKEN_TTL", source, 60),
+            session_idle_timeout_seconds=_positive_int("CEHO_SESSION_IDLE_TIMEOUT", source, 900),
             deepgram_api_key=_optional_value("DEEPGRAM_API_KEY", source),
         )
