@@ -285,6 +285,7 @@ Implemented in `ceho_core`:
 - `media_objects`
 - `transcripts` with `session_speaker_id` and optional media provenance
 - `outbox_events`
+- the `pgmq` extension, enabled in the devcontainer Postgres image. `pgmq://<name>` publishes there. See https://github.com/pgmq/pgmq
 
 Not implemented yet: mapping status and source identity on `session_speakers`.
 
@@ -358,8 +359,13 @@ The identity, type, version, sequence, and payload cannot change after insert.
 Publication status, attempt count, and publication timestamps can. Status is
 `pending`, `published`, or `failed`. `published_at` is set only when the status
 is `published`. The hot-server process publishes pending rows through the
-publisher selected by `CEHO_EVENT_PUBLISHER_URL`. `memory://` keeps envelopes
-in process. A row that cannot be sent stays `pending`.
+publisher selected by `CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` calls
+`pgmq.send` on the queue named by that URL. A row that cannot be sent stays
+`pending`.
+
+`publisher_from_url` is the switch. A later bus is another scheme in that
+function, still accepting one `EventEnvelope` per call. The outbox table stays
+the same. pgmq queues live in the `pgmq` schema, one table per queue.
 
 The outbox is the durable handoff from hot path to cold consumers. It is not a
 replacement for their projections or queues.
@@ -411,7 +417,9 @@ There is no `transcript.updated` event until CEHO persists revisions.
 
 The transaction that creates/ends a session or commits a transcript also inserts an outbox record. It does not call the bus. `publish_pending` runs in the hot-server process. After a finalize commit, that session's pending rows are pushed immediately when the caller supplies a publisher. The server lifespan also calls `publish_pending` about once a second for every pending row, including once at startup. `create_app` without an engine does not connect to PostgreSQL.
 
-`pending` means the row is committed and has not been accepted by the bus. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. The oldest pending `sequence` in a session is eligible only when every smaller sequence is published. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
+`pending` means the row is committed and has not been accepted by the publisher. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. For `pgmq`, the send is `pgmq.send`. The oldest pending `sequence` in a session is eligible only when every smaller sequence is published. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
+
+`pgmq.read` claims messages in `msg_id` order and hides them for the visibility timeout. A message that is not archived or deleted in that window can be read again. `pgmq.archive` moves it to that queue's archive table. Consumers still dedupe on `event_id`: a crash after send and before `published` sends the same event again.
 
 This avoids a dual-write loss without distributed transactions:
 
@@ -423,7 +431,7 @@ Delivery is at least once. Consumers deduplicate with `event_id`, not only sessi
 
 ### Ordering
 
-Outbox records include a per-session `sequence`. The publisher sends one session in `sequence` order. `memory://` keeps that call order. Consumers tolerate duplicates and do not assume a global order across sessions.
+Outbox records include a per-session `sequence`. The publisher sends one session in `sequence` order. pgmq keeps that send order as `msg_id` on the named queue. Consumers tolerate duplicates and do not assume a global order across sessions.
 
 ## Failure and recovery
 
@@ -523,11 +531,12 @@ and exposes `GET /health`. Startup validates `DATABASE_URL`,
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
 present and used only to construct the direct-source Deepgram STT processor.
-`main` builds the database engine and the publisher. `memory://` appends
-envelopes in the process; any other scheme fails at startup. With an engine
-configured, the process drains pending outbox rows about once a second. This
-foundation does not record audio yet. Package layout for later hot-path modules
-is under [Target package structure](#target-package-structure).
+`main` builds the database engine and the publisher named by
+`CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` is the pgmq queue. Any other
+scheme fails at startup until `publisher_from_url` grows a branch for it. With
+an engine configured, the process drains pending outbox rows about once a
+second. This foundation does not record audio yet. Package layout for later
+hot-path modules is under [Target package structure](#target-package-structure).
 
 ## Implementation sequence
 
@@ -537,7 +546,7 @@ is under [Target package structure](#target-package-structure).
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
 5. Implement recording to durable shared/object storage.
 6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.
-7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals and the `memory://` publisher. Session create and end insert their own outbox rows when that lifecycle is built. A network broker remains open.
+7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals and the `pgmq://` publisher. Session create and end insert their own outbox rows when that lifecycle is built. Another publisher scheme remains a branch in `publisher_from_url`.
 8. Validate direct-source attribution, then diarization for mixed sources.
 9. Add observability and staged load tests before estimating capacity.
 10. Design ownership leases before deploying more than one hot-server instance.
@@ -553,7 +562,7 @@ is under [Target package structure](#target-package-structure).
 - How source audio is written to S3: decide the incremental write model first (multipart upload, append segments, or one object per segment). Only after that is fixed should `media_objects` write-state transitions and any DB update cadence be finalized. The schema already allows `write_status` `open` → `complete`/`failed` and stores a server-owned `storage_uri`; the uploader and when the row is updated are still open.
 - Raw-audio retention, encryption, deletion, and access control.
 - Idle/reconnect timing and the supported in-progress-speech loss window.
-- A network broker behind the outbox publisher. `memory://` is the in-process publisher; pending rows are claimed, sent, and marked published by the hot-server process.
+- Which publisher scheme follows `pgmq`. The outbox and `EventPublisher` stay; a new scheme is added in `publisher_from_url`.
 - Numeric resource limits and SLOs, based on load tests.
 - The ownership-lease implementation for multi-instance hot servers.
 

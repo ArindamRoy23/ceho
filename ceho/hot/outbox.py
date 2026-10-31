@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections.abc import Collection, Mapping
@@ -10,8 +11,8 @@ from datetime import datetime
 from typing import Protocol
 from urllib.parse import urlparse
 
-from sqlalchemy import Table, and_, exists, func, insert, or_, select, update
-from sqlalchemy.engine import Connection
+from sqlalchemy import Table, and_, exists, func, insert, or_, select, text, update
+from sqlalchemy.engine import Connection, Engine
 
 from ceho.hot.config import ConfigurationError
 from ceho.models import Base, OutboxEvent
@@ -64,27 +65,162 @@ class OutboxStore(Protocol):
         """Record that ``event_id`` was accepted by the bus."""
 
 
-class MemoryEventPublisher:
-    """In-process bus for ``memory://``. Envelopes stay in call order."""
+class EventQueueError(RuntimeError):
+    """A queue message could not be read or archived."""
 
-    def __init__(self) -> None:
-        self.events: list[EventEnvelope] = []
+
+@dataclass(frozen=True)
+class QueuedMessage:
+    """One claimed queue message and the envelope it carries."""
+
+    message_id: int
+    read_count: int
+    envelope: EventEnvelope
+
+
+class PgmqPublisher:
+    """pgmq queue selected by ``pgmq://<name>``. See https://github.com/pgmq/pgmq.
+
+    ``publish`` calls ``pgmq.send``. ``read`` calls ``pgmq.read`` and hides each
+    message for the visibility timeout. ``archive`` calls ``pgmq.archive``.
+    Another ``CEHO_EVENT_PUBLISHER_URL`` scheme implements ``EventPublisher``
+    and does not use this queue.
+    """
+
+    def __init__(self, engine: Engine, queue_name: str) -> None:
+        self._engine = engine
+        self._queue_name = _queue_name(queue_name)
+        self._created = False
+
+    @property
+    def queue_name(self) -> str:
+        return self._queue_name
 
     @property
     def preserves_session_order(self) -> bool:
         return True
 
     def publish(self, envelope: EventEnvelope) -> None:
-        self.events.append(envelope)
+        with self._engine.begin() as connection:
+            self._ensure_queue(connection)
+            connection.execute(
+                text("SELECT pgmq.send(CAST(:queue_name AS text), CAST(:message AS jsonb))"),
+                {"queue_name": self._queue_name, "message": json.dumps(_message_body(envelope))},
+            )
+        self._created = True
+
+    def read(self, *, batch: int = 1, visibility_seconds: int = 30) -> list[QueuedMessage]:
+        """Claim up to ``batch`` visible messages, hiding each for ``visibility_seconds``."""
+        if batch < 1:
+            raise EventQueueError("batch must be positive")
+        if visibility_seconds < 0:
+            raise EventQueueError("visibility_seconds must be non-negative")
+        with self._engine.begin() as connection:
+            self._ensure_queue(connection)
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT msg_id, read_ct, message "
+                        "FROM pgmq.read(CAST(:queue_name AS text), :vt, :qty)"
+                    ),
+                    {
+                        "queue_name": self._queue_name,
+                        "vt": visibility_seconds,
+                        "qty": batch,
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        self._created = True
+        return [
+            QueuedMessage(
+                message_id=int(row["msg_id"]),
+                read_count=int(row["read_ct"]),
+                envelope=_envelope_from_message(row["message"]),
+            )
+            for row in sorted(rows, key=lambda row: int(row["msg_id"]))
+        ]
+
+    def archive(self, message_id: int) -> None:
+        """Move one message on this queue into the pgmq archive."""
+        with self._engine.begin() as connection:
+            self._ensure_queue(connection)
+            archived = connection.execute(
+                text("SELECT pgmq.archive(CAST(:queue_name AS text), :msg_id)"),
+                {"queue_name": self._queue_name, "msg_id": message_id},
+            ).scalar_one()
+        self._created = True
+        if archived is not True:
+            raise EventQueueError(f"queue message {message_id} was not available")
+
+    def _ensure_queue(self, connection: Connection) -> None:
+        if self._created:
+            return
+        connection.execute(
+            text("SELECT pgmq.create(CAST(:queue_name AS text))"),
+            {"queue_name": self._queue_name},
+        )
 
 
-def publisher_from_url(url: str) -> EventPublisher:
-    """Build the publisher selected by ``CEHO_EVENT_PUBLISHER_URL``."""
-    scheme = urlparse(url).scheme
-    if scheme == "memory":
-        return MemoryEventPublisher()
+def publisher_from_url(url: str, engine: Engine) -> EventPublisher:
+    """Build the publisher selected by ``CEHO_EVENT_PUBLISHER_URL``.
+
+    ``pgmq://<name>`` sends through the pgmq extension. A different bus is a
+    new scheme in this function that still accepts ``EventEnvelope``.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme == "pgmq":
+        return PgmqPublisher(engine, parsed.netloc or parsed.path)
     raise ConfigurationError(
-        f"CEHO_EVENT_PUBLISHER_URL scheme {scheme!r} is not supported; use memory://"
+        f"CEHO_EVENT_PUBLISHER_URL scheme {parsed.scheme!r} is not supported; use pgmq://"
+    )
+
+
+def _queue_name(raw: str) -> str:
+    name = raw.strip().strip("/")
+    if (
+        not name
+        or name != name.strip()
+        or len(name) > 47
+        or "/" in name
+        or any(token in name for token in ("$", ";", "--", "'"))
+    ):
+        raise ConfigurationError("CEHO_EVENT_PUBLISHER_URL must be pgmq://<name>")
+    return name
+
+
+def _message_body(envelope: EventEnvelope) -> dict[str, object]:
+    if envelope.occurred_at.tzinfo is None:
+        raise EventQueueError("occurred_at must include a timezone")
+    return {
+        "event_id": envelope.event_id,
+        "schema_version": envelope.schema_version,
+        "event_type": envelope.event_type,
+        "tenant_id": envelope.tenant_id,
+        "session_id": envelope.session_id,
+        "sequence": envelope.sequence,
+        "occurred_at": envelope.occurred_at.isoformat(),
+        "payload": dict(envelope.payload),
+    }
+
+
+def _envelope_from_message(body: object) -> EventEnvelope:
+    if not isinstance(body, dict):
+        raise EventQueueError("queue message is not an object")
+    payload = body.get("payload")
+    occurred_at = body.get("occurred_at")
+    if not isinstance(payload, dict) or not isinstance(occurred_at, str):
+        raise EventQueueError("queue message is missing its envelope")
+    return EventEnvelope(
+        event_id=int(body["event_id"]),
+        schema_version=int(body["schema_version"]),
+        event_type=str(body["event_type"]),
+        tenant_id=int(body["tenant_id"]),
+        session_id=int(body["session_id"]),
+        sequence=int(body["sequence"]),
+        occurred_at=datetime.fromisoformat(occurred_at),
+        payload=payload,
     )
 
 

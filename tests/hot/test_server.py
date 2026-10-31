@@ -23,7 +23,7 @@ class HotServerApplicationTest(unittest.TestCase):
             s3_secret_access_key="ceho-dev-only",
             s3_region="us-east-1",
             signaling_secret="test-secret",
-            event_publisher_url="memory://ceho",
+            event_publisher_url="pgmq://ceho",
             host="127.0.0.1",
             port=8000,
         )
@@ -47,7 +47,7 @@ class HotServerMainTest(unittest.TestCase):
             s3_secret_access_key="ceho-dev-only",
             s3_region="us-east-1",
             signaling_secret="test-secret",
-            event_publisher_url="memory://ceho",
+            event_publisher_url="pgmq://ceho",
             host="127.0.0.1",
             port=8000,
         )
@@ -86,7 +86,7 @@ class HotServerOutboxDrainTest(unittest.TestCase):
             s3_secret_access_key="ceho-dev-only",
             s3_region="us-east-1",
             signaling_secret="test-secret",
-            event_publisher_url="memory://ceho",
+            event_publisher_url="pgmq://ceho",
             host="127.0.0.1",
             port=8000,
         )

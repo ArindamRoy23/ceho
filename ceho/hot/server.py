@@ -30,7 +30,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
     if app.state.engine is not None:
         publisher = app.state.publisher or publisher_from_url(
-            app.state.settings.event_publisher_url
+            app.state.settings.event_publisher_url,
+            app.state.engine,
         )
         app.state.publisher = publisher
         task = asyncio.create_task(_drain_outbox(app.state.engine, publisher))
@@ -83,7 +84,7 @@ def main() -> None:
     """Run the hot server with settings from the process environment."""
     settings = HotServerSettings.from_environment()
     engine = create_database_engine(settings.database_url)
-    publisher = publisher_from_url(settings.event_publisher_url)
+    publisher = publisher_from_url(settings.event_publisher_url, engine)
     uvicorn.run(
         create_app(settings, engine=engine, publisher=publisher),
         host=settings.host,

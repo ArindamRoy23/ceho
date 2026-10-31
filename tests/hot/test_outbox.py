@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select, text
 
 from ceho.hot.config import ConfigurationError
 from ceho.hot.outbox import (
     SCHEMA_VERSION,
     DatabaseOutboxStore,
     EventEnvelope,
-    MemoryEventPublisher,
+    EventQueueError,
+    PgmqPublisher,
     insert_outbox_event,
     publish_pending,
     publisher_from_url,
@@ -144,22 +146,89 @@ def test_transcript_created_payload_is_version_1() -> None:
     }
 
 
-def test_memory_publisher_keeps_events_in_call_order() -> None:
-    publisher = publisher_from_url("memory://ceho")
-    assert isinstance(publisher, MemoryEventPublisher)
+def test_pgmq_url_selects_the_postgres_queue(active_session: ActiveSession) -> None:
+    publisher = publisher_from_url("pgmq://probe", active_session.engine)
+
+    assert isinstance(publisher, PgmqPublisher)
+    assert publisher.queue_name == "probe"
     assert publisher.preserves_session_order is True
-    first = _envelope(event_id=1, session_id=4, sequence=0)
-    second = _envelope(event_id=2, session_id=4, sequence=1)
-
-    publisher.publish(first)
-    publisher.publish(second)
-
-    assert publisher.events == [first, second]
 
 
 def test_unknown_publisher_scheme_fails_clearly() -> None:
-    with pytest.raises(ConfigurationError, match="CEHO_EVENT_PUBLISHER_URL"):
-        publisher_from_url("kafka://broker:9092")
+    engine = create_engine("postgresql+psycopg://ceho:ceho@localhost/ceho")
+
+    with pytest.raises(ConfigurationError, match="pgmq://"):
+        publisher_from_url("kafka://broker:9092", engine)
+
+
+def test_pgmq_url_must_name_a_queue() -> None:
+    engine = create_engine("postgresql+psycopg://ceho:ceho@localhost/ceho")
+
+    with pytest.raises(ConfigurationError, match="pgmq://"):
+        publisher_from_url("pgmq://", engine)
+
+
+def test_pgmq_keeps_envelopes_in_send_order(active_session: ActiveSession) -> None:
+    queue = PgmqPublisher(active_session.engine, f"order-{uuid4()}")
+    first = _envelope(event_id=1, session_id=4, sequence=0)
+    second = _envelope(event_id=2, session_id=4, sequence=1)
+
+    queue.publish(first)
+    queue.publish(second)
+    messages = queue.read(batch=10, visibility_seconds=30)
+
+    assert [message.envelope for message in messages] == [first, second]
+    assert queue.read(batch=10, visibility_seconds=30) == []
+
+
+def test_publish_stays_on_the_named_queue(active_session: ActiveSession) -> None:
+    left = PgmqPublisher(active_session.engine, f"left-{uuid4()}")
+    right = PgmqPublisher(active_session.engine, f"right-{uuid4()}")
+    left.publish(_envelope(event_id=1, session_id=1, sequence=0))
+
+    assert right.read(batch=10, visibility_seconds=30) == []
+    claimed = left.read(batch=10, visibility_seconds=30)
+    assert [message.envelope.event_id for message in claimed] == [1]
+
+
+def test_claimed_message_is_hidden_until_it_becomes_visible(
+    active_session: ActiveSession,
+) -> None:
+    queue = PgmqPublisher(active_session.engine, f"vt-{uuid4()}")
+    queue.publish(_envelope(event_id=7, session_id=1, sequence=0))
+
+    claimed = queue.read(batch=1, visibility_seconds=60)
+
+    assert len(claimed) == 1
+    assert claimed[0].read_count == 1
+    assert queue.read(batch=1, visibility_seconds=60) == []
+    with active_session.engine.begin() as connection:
+        connection.execute(
+            text(
+                "SELECT pgmq.set_vt(CAST(:queue_name AS text), CAST(:msg_id AS bigint), "
+                "CAST(:vt AS integer))"
+            ),
+            {"queue_name": queue.queue_name, "msg_id": claimed[0].message_id, "vt": 0},
+        )
+    again = queue.read(batch=1, visibility_seconds=60)
+    assert [message.envelope.event_id for message in again] == [7]
+    assert again[0].read_count == 2
+
+
+def test_archived_message_is_not_read_again(active_session: ActiveSession) -> None:
+    queue = PgmqPublisher(active_session.engine, f"ack-{uuid4()}")
+    queue.publish(_envelope(event_id=8, session_id=1, sequence=0))
+    claimed = queue.read(batch=1, visibility_seconds=60)
+    queue.archive(claimed[0].message_id)
+
+    assert queue.read(batch=1, visibility_seconds=0) == []
+
+
+def test_archive_of_an_unknown_message_fails(active_session: ActiveSession) -> None:
+    queue = PgmqPublisher(active_session.engine, f"missing-{uuid4()}")
+
+    with pytest.raises(EventQueueError, match="message"):
+        queue.archive(9_999_999_999)
 
 
 def test_publish_failure_blocks_later_sequences_and_continues_other_sessions() -> None:
@@ -189,9 +258,9 @@ def test_crash_before_send_retries_the_pending_event() -> None:
     assert row.status == "pending"
     assert row.attempt_count == 1
 
-    delivered = MemoryEventPublisher()
+    delivered = _Publisher()
     assert publish_pending(store, delivered) == 1
-    assert [event.event_id for event in delivered.events] == [10]
+    assert delivered.sent == [(1, 0, 10)]
     assert row.status == "published"
 
 
@@ -228,10 +297,10 @@ def test_events_publish_in_session_sequence_order() -> None:
         _Row(_envelope(event_id=2, session_id=1, sequence=1)),
         _Row(_envelope(event_id=1, session_id=1, sequence=0)),
     ]
-    publisher = MemoryEventPublisher()
+    publisher = _Publisher()
 
     assert publish_pending(RecordingOutbox(rows), publisher) == 2
-    assert [event.event_id for event in publisher.events] == [1, 2]
+    assert [event_id for _, _, event_id in publisher.sent] == [1, 2]
 
 
 def _command(rows: ActiveSession) -> FinalizeTranscript:
@@ -353,7 +422,7 @@ def test_database_publishes_an_earlier_session_event_before_the_transcript(
     assert finalized.turn_index == 0
     assert finalized.sequence == 1
 
-    publisher = MemoryEventPublisher()
+    publisher = PgmqPublisher(active_session.engine, f"session-{active_session.session_id}")
     with active_session.connect() as connection:
         assert (
             publish_pending(
@@ -367,8 +436,9 @@ def test_database_publishes_an_earlier_session_event_before_the_transcript(
             == 2
         )
 
-    assert [(event.event_type, event.sequence) for event in publisher.events] == [
+    messages = publisher.read(batch=10, visibility_seconds=30)
+    assert [(message.envelope.event_type, message.envelope.sequence) for message in messages] == [
         ("session.created", 0),
         ("transcript.created", 1),
     ]
-    assert publisher.events[1].event_id == finalized.event_id
+    assert messages[1].envelope.event_id == finalized.event_id
