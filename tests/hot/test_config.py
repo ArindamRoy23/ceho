@@ -21,7 +21,7 @@ def _environment(**overrides: str) -> dict[str, str]:
         "CEHO_S3_SECRET_ACCESS_KEY": "ceho-dev-only",
         "CEHO_S3_REGION": "us-east-1",
         "CEHO_SIGNALING_SECRET": "test-secret",
-        "CEHO_EVENT_PUBLISHER_URL": "memory://ceho",
+        "CEHO_EVENT_PUBLISHER_URL": "pgmq://ceho",
     }
     values.update(overrides)
     return values

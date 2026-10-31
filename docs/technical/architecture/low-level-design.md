@@ -247,11 +247,11 @@ Pipecat capabilities, streaming-provider behavior, measured latency, and quality
 
 A final provider result becomes a `TranscriptCandidate` when the trimmed text is non-empty. The candidate carries the direct-source context, including the expected `session_speaker_id`, plus the session-timeline start and end in milliseconds. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, and text is kept once.
 
-Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller holds the candidates until the transcript transaction exists.
+Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller passes each final candidate to `finalize_transcript`.
 
 ### Speaker handling
 
-For a direct authenticated source, the server has a strong candidate for the originating session speaker. The direct-source STT run does not insert `session_speakers` yet. It carries the expected `session_speaker_id` on the candidate for that later attribution step.
+For a direct authenticated source, the server has a strong candidate for the originating session speaker. The direct-source STT run does not insert `session_speakers`. `finalize_transcript` does, in the same transaction as the transcript. The first final turn from a source omits `session_speaker_id` and creates one row in that session. Later finals from the same source pass the returned id and reuse it. A different source creates its own row as its speech arrives. Each session has its own session speakers.
 
 For a mixed source, diarization produces one or more session speakers. Linking a session speaker to a speaker, and a speaker to a platform user, is a separate confirmation. User recognition and cross-session voice recognition are not part of this pipeline.
 
@@ -285,6 +285,7 @@ Implemented in `ceho_core`:
 - `media_objects`
 - `transcripts` with `session_speaker_id` and optional media provenance
 - `outbox_events`
+- the `pgmq` extension, enabled in the devcontainer Postgres image. `pgmq://<name>` publishes there. See https://github.com/pgmq/pgmq
 
 Not implemented yet: mapping status and source identity on `session_speakers`.
 
@@ -357,7 +358,14 @@ version, per-session `sequence`, and a JSON payload. Event types are
 The identity, type, version, sequence, and payload cannot change after insert.
 Publication status, attempt count, and publication timestamps can. Status is
 `pending`, `published`, or `failed`. `published_at` is set only when the status
-is `published`. No publisher or broker is included yet.
+is `published`. The hot-server process publishes pending rows through the
+publisher selected by `CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` calls
+`pgmq.send` on the queue named by that URL. A row that cannot be sent stays
+`pending`.
+
+`publisher_from_url` is the switch. A later bus is another scheme in that
+function, still accepting one `EventEnvelope` per call. The outbox table stays
+the same. pgmq queues live in the `pgmq` schema, one table per queue.
 
 The outbox is the durable handoff from hot path to cold consumers. It is not a
 replacement for their projections or queues.
@@ -376,16 +384,18 @@ The system emits an operational event or log for every provenance gap. Retention
 
 ## Final transcript transaction
 
-The transcript write is the hot path's atomic durable operation. In one PostgreSQL transaction, `session.py`:
+The transcript write is the hot path's atomic durable operation. `finalize_transcript` runs when a final candidate is ready. Session close does not batch transcripts. In one PostgreSQL transaction, `session.py`:
 
-1. Locks the session row.
-2. Confirms the session is active.
-3. Allocates the next per-session `turn_index`.
-4. Inserts the final transcript with speaker and media references.
-5. Inserts one `transcript.created` outbox record with the same session ordering value.
-6. Commits.
+1. Locks the session row (`SELECT … FOR UPDATE`).
+2. Confirms the session exists and is active.
+3. Resolves or creates the local session speaker. A missing `session_speaker_id` inserts one row for this session. A supplied id must already belong to this tenant and session.
+4. Allocates the next per-session `turn_index` in SQL as `COALESCE(MAX(turn_index), -1) + 1`, starting at 0.
+5. Inserts the final transcript. `start_at` and `end_at` are `session.started_at` plus the candidate's session-timeline milliseconds. Media provenance is all three fields or none, and the media row must belong to this session.
+6. Allocates the next per-session outbox `sequence` with the same SQL expression. `sequence` is not `turn_index`: both event types share `sequence`, and the payload carries `turn_index`.
+7. Inserts one `transcript.created` outbox record at schema version 1 with `publication_status = pending`.
+8. Commits.
 
-The transaction does not call an STT provider, write media bytes, or publish to the broker. The session-row lock serializes final commits and guarantees unique index allocation.
+The transaction does not call an STT provider, write media bytes, or publish to the bus. The session-row lock serializes final commits and guarantees unique index allocation. Blank text, a reversed interval, a blank label, and a partial media trio are rejected before the transaction starts.
 
 Two sources can finish in an order different from their spoken timestamps. This is expected. Consumers use timestamps for timeline order and outbox sequence for deterministic processing order.
 
@@ -405,19 +415,23 @@ There is no `transcript.updated` event until CEHO persists revisions.
 
 ### Publication
 
-The transaction that creates/ends a session or commits a transcript also inserts an outbox record. A separate publisher claims committed records, sends them to the configured broker, and marks them published.
+The transaction that creates/ends a session or commits a transcript also inserts an outbox record. It does not call the bus. `publish_pending` runs in the hot-server process. After a finalize commit, that session's pending rows are pushed immediately when the caller supplies a publisher. The server lifespan also calls `publish_pending` about once a second for every pending row, including once at startup. `create_app` without an engine does not connect to PostgreSQL.
+
+`pending` means the row is committed and has not been accepted by the publisher. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. For `pgmq`, the send is `pgmq.send`. The oldest pending `sequence` in a session is eligible only when every smaller sequence is published. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
+
+`pgmq.read` claims messages in `msg_id` order and hides them for the visibility timeout. A message that is not archived or deleted in that window can be read again. `pgmq.archive` moves it to that queue's archive table. Consumers still dedupe on `event_id`: a crash after send and before `published` sends the same event again.
 
 This avoids a dual-write loss without distributed transactions:
 
 - Crash before commit: neither the state change nor event exists.
-- Crash after commit and before send: the committed outbox record is retried.
-- Crash after send and before marking published: delivery can repeat.
+- Crash after commit and before send: the committed outbox record is retried by the next drain.
+- Crash after send and before marking published: delivery repeats the same `event_id`.
 
 Delivery is at least once. Consumers deduplicate with `event_id`, not only session ID or turn index.
 
 ### Ordering
 
-Outbox records include a per-session ordering value. The publisher preserves this ordering for a session where the broker permits it. Consumers tolerate duplicates and do not assume a global order across sessions.
+Outbox records include a per-session `sequence`. The publisher sends one session in `sequence` order. pgmq keeps that send order as `msg_id` on the named queue. Consumers tolerate duplicates and do not assume a global order across sessions.
 
 ## Failure and recovery
 
@@ -427,7 +441,7 @@ Outbox records include a per-session ordering value. The publisher preserves thi
 
 A process crash terminates its live peers, pipeline runs, and in-memory partial state. It does not end the durable session automatically.
 
-Committed transcripts and outbox events survive. In-progress speech is lost unless a future channel supports explicit replay. On restart, pending outbox publication resumes. Clients reconnect through the authenticated join flow and create new peers/pipelines.
+Committed transcripts and outbox events survive. In-progress speech is lost unless a future channel supports explicit replay. On restart, the lifespan drain publishes rows that are still `pending`. Clients reconnect through the authenticated join flow and create new peers/pipelines.
 
 ### Pipeline or provider failure
 
@@ -517,9 +531,12 @@ and exposes `GET /health`. Startup validates `DATABASE_URL`,
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
 present and used only to construct the direct-source Deepgram STT processor.
-The in-memory publisher is a development placeholder. This foundation does not
-record audio or publish events yet. Package layout for later hot-path modules
-is under [Target package structure](#target-package-structure).
+`main` builds the database engine and the publisher named by
+`CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` is the pgmq queue. Any other
+scheme fails at startup until `publisher_from_url` grows a branch for it. With
+an engine configured, the process drains pending outbox rows about once a
+second. This foundation does not record audio yet. Package layout for later
+hot-path modules is under [Target package structure](#target-package-structure).
 
 ## Implementation sequence
 
@@ -528,8 +545,8 @@ is under [Target package structure](#target-package-structure).
 3. Implement the transport port and WebRTC adapter.
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
 5. Implement recording to durable shared/object storage.
-6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. Persistence is still step 7.
-7. Implement transcript transactions and the outbox publisher.
+6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.
+7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals and the `pgmq://` publisher. Session create and end insert their own outbox rows when that lifecycle is built. Another publisher scheme remains a branch in `publisher_from_url`.
 8. Validate direct-source attribution, then diarization for mixed sources.
 9. Add observability and staged load tests before estimating capacity.
 10. Design ownership leases before deploying more than one hot-server instance.
@@ -545,7 +562,7 @@ is under [Target package structure](#target-package-structure).
 - How source audio is written to S3: decide the incremental write model first (multipart upload, append segments, or one object per segment). Only after that is fixed should `media_objects` write-state transitions and any DB update cadence be finalized. The schema already allows `write_status` `open` → `complete`/`failed` and stores a server-owned `storage_uri`; the uploader and when the row is updated are still open.
 - Raw-audio retention, encryption, deletion, and access control.
 - Idle/reconnect timing and the supported in-progress-speech loss window.
-- The broker or PostgreSQL-queue implementation behind the outbox publisher.
+- Which publisher scheme follows `pgmq`. The outbox and `EventPublisher` stay; a new scheme is added in `publisher_from_url`.
 - Numeric resource limits and SLOs, based on load tests.
 - The ownership-lease implementation for multi-instance hot servers.
 

@@ -20,7 +20,8 @@ the media object and millisecond interval that support that turn.
 
 Media objects store server-owned S3 locations for source audio. Outbox events
 live in this schema so a domain write and its event can commit together. The
-outbox identity and payload are immutable after insert.
+outbox identity and payload are immutable after insert. The pgmq extension,
+not a mapped table, holds the queue those events are published to.
 
 The design DDL in docs/technical/architecture/ceho_core/ddl matches these
 classes. These classes are the schema source of truth.

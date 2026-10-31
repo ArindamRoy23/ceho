@@ -1,6 +1,8 @@
-# Local development only. PostgreSQL is a provisional database. MinIO is the
-# local S3 API for media objects; cloud deployment uses the same bucket URI
-# with CEHO_S3_ENDPOINT_URL unset. Vector store, cache, and queue are absent.
+# Local development only. PostgreSQL is a provisional database. The image is
+# Postgres 16 with the pgmq extension installed. Alembic runs CREATE EXTENSION
+# pgmq. MinIO is the local S3 API for media objects; cloud deployment uses the
+# same bucket URI with CEHO_S3_ENDPOINT_URL unset. Vector store and cache are
+# absent.
 services:
   app:
     build:
@@ -21,7 +23,7 @@ services:
       UV_PROJECT_ENVIRONMENT: /home/vscode/.venv
 
   postgres:
-    image: postgres:16
+    image: ghcr.io/pgmq/pg16-pgmq:v1.10.0
     restart: unless-stopped
     env_file:
       - ../.env
