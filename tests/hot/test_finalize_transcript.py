@@ -88,6 +88,61 @@ def test_invalid_transcript_is_rejected_before_any_write(
         finalize_transcript(cast(Connection, _RejectingConnection()), command)
 
 
+def test_rejected_transcript_logs_the_reason_without_the_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.session")
+    text = " hello"
+    command = FinalizeTranscript(
+        tenant_id=1,
+        session_id=1,
+        text=text,
+        start_ms=0,
+        end_ms=1,
+    )
+
+    with pytest.raises(InvalidTranscript, match="non-empty"):
+        finalize_transcript(cast(Connection, _RejectingConnection()), command)
+
+    records = [record for record in caplog.records if record.msg == "transcript rejected"]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    fields = getattr(records[0], "ceho_fields", None)
+    assert isinstance(fields, dict)
+    assert fields["tenant_id"] == 1
+    assert fields["session_id"] == 1
+    assert fields["error"] == "transcript text must be non-empty and stripped"
+    assert "hello" not in records[0].msg
+    assert "hello" not in str(fields)
+
+
+def test_committed_transcript_is_logged(
+    active_session: ActiveSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.session")
+    with active_session.connect() as connection:
+        finalized = finalize_transcript(connection, _command(active_session, label="speaker_1"))
+
+    records = [record for record in caplog.records if record.name == "ceho.hot.session"]
+    started = [record for record in records if record.msg == "transcript commit started"]
+    committed = [record for record in records if record.msg == "transcript committed"]
+    assert len(started) == 1
+    assert len(committed) == 1
+    started_fields = getattr(started[0], "ceho_fields", None)
+    committed_fields = getattr(committed[0], "ceho_fields", None)
+    assert isinstance(started_fields, dict)
+    assert isinstance(committed_fields, dict)
+    assert started_fields["turn_index"] == 0
+    assert started_fields["media_present"] is False
+    assert committed_fields["outbox_id"] == finalized.event_id
+    assert committed_fields["tenant_id"] == active_session.tenant_id
+    assert committed_fields["session_id"] == active_session.session_id
+    assert committed_fields["turn_index"] == 0
+    assert "hello" not in committed[0].msg
+    assert "hello" not in str(committed_fields)
+
+
 def test_missing_session_writes_nothing(active_session: ActiveSession) -> None:
     command = _command(active_session, session_id=active_session.session_id + 1_000_000)
 

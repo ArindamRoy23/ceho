@@ -15,6 +15,7 @@ from ceho.hot.outbox import (
     DatabaseOutboxStore,
     EventEnvelope,
     EventQueueError,
+    OutboxPublishError,
     PgmqPublisher,
     insert_outbox_event,
     publish_pending,
@@ -442,3 +443,94 @@ def test_database_publishes_an_earlier_session_event_before_the_transcript(
         ("transcript.created", 1),
     ]
     assert messages[1].envelope.event_id == finalized.event_id
+
+
+def _fields(record: object) -> dict[str, object]:
+    fields = getattr(record, "ceho_fields", None)
+    assert isinstance(fields, dict)
+    return fields
+
+
+def test_publish_logs_the_claim_the_failure_and_the_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.outbox")
+    rows = [
+        _Row(_envelope(event_id=10, session_id=1, sequence=0)),
+        _Row(_envelope(event_id=11, session_id=1, sequence=1)),
+        _Row(_envelope(event_id=20, session_id=2, sequence=0)),
+    ]
+    publisher = _Publisher(fail_sessions={1})
+
+    assert publish_pending(RecordingOutbox(rows), publisher) == 1
+
+    records = [record for record in caplog.records if record.name == "ceho.hot.outbox"]
+    claimed = [record for record in records if record.msg == "outbox event claimed"]
+    claimed_ids: list[int] = []
+    for record in claimed:
+        outbox_id = _fields(record)["outbox_id"]
+        assert isinstance(outbox_id, int)
+        claimed_ids.append(outbox_id)
+    assert claimed_ids == [10, 20]
+    warnings = [record for record in records if record.msg == "outbox event not published"]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert warnings[0].exc_info is not None
+    assert _fields(warnings[0])["outbox_id"] == 10
+    assert _fields(warnings[0])["tenant_id"] == 1
+    assert _fields(warnings[0])["session_id"] == 1
+    published = [record for record in records if record.msg == "outbox event published"]
+    assert len(published) == 1
+    assert published[0].levelname == "INFO"
+    assert _fields(published[0])["outbox_id"] == 20
+    assert _fields(published[0])["sequence"] == 0
+    assert all("hello" not in record.msg for record in records)
+    assert all("hello" not in str(getattr(record, "ceho_fields", "")) for record in records)
+
+
+def test_invalid_outbox_payload_is_logged(
+    active_session: ActiveSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.outbox")
+    with active_session.connect() as connection:
+        with connection.begin():
+            event_id = connection.execute(
+                text(
+                    "INSERT INTO ceho_core.outbox_events "
+                    "(tenant_id, session_id, event_type, schema_version, sequence, payload) "
+                    "VALUES (:tenant_id, :session_id, 'transcript.created', 1, 0, '[]'::jsonb) "
+                    "RETURNING event_id"
+                ),
+                {
+                    "tenant_id": active_session.tenant_id,
+                    "session_id": active_session.session_id,
+                },
+            ).scalar_one()
+        with pytest.raises(OutboxPublishError, match="not an object"):
+            DatabaseOutboxStore(
+                connection,
+                tenant_id=active_session.tenant_id,
+                session_id=active_session.session_id,
+            ).claim_next(())
+
+    records = [record for record in caplog.records if record.msg == "outbox event payload invalid"]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert _fields(records[0])["outbox_id"] == event_id
+    assert "hello" not in str(_fields(records[0]))
+
+
+def test_mark_published_logs_when_the_row_is_not_pending(
+    active_session: ActiveSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.outbox")
+    with active_session.connect() as connection:
+        with pytest.raises(OutboxPublishError, match="not pending"):
+            DatabaseOutboxStore(connection).mark_published(9_999_999_999)
+
+    records = [record for record in caplog.records if record.msg == "outbox event not pending"]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert _fields(records[0])["outbox_id"] == 9_999_999_999

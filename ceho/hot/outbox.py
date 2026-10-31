@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import threading
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -15,9 +14,10 @@ from sqlalchemy import Table, and_, exists, func, insert, or_, select, text, upd
 from sqlalchemy.engine import Connection, Engine
 
 from ceho.hot.config import ConfigurationError
+from ceho.logging import get_logger
 from ceho.models import Base, OutboxEvent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
 TRANSCRIPT_CREATED = "transcript.created"
@@ -295,23 +295,33 @@ def publish_pending(store: OutboxStore, publisher: EventPublisher) -> int:
             envelope = store.claim_next(blocked)
             if envelope is None:
                 return published
+            logger.debug(
+                "outbox event claimed",
+                outbox_id=envelope.event_id,
+                tenant_id=envelope.tenant_id,
+                session_id=envelope.session_id,
+                sequence=envelope.sequence,
+            )
             try:
                 publisher.publish(envelope)
                 store.mark_published(envelope.event_id)
             except Exception:
-                logger.exception(
-                    "outbox event %s for session %s was not published",
-                    envelope.event_id,
-                    envelope.session_id,
+                logger.warning(
+                    "outbox event not published",
+                    outbox_id=envelope.event_id,
+                    tenant_id=envelope.tenant_id,
+                    session_id=envelope.session_id,
+                    exc_info=True,
                 )
                 blocked.add((envelope.tenant_id, envelope.session_id))
                 continue
             logger.info(
-                "published outbox event %s type %s session %s sequence %s",
-                envelope.event_id,
-                envelope.event_type,
-                envelope.session_id,
-                envelope.sequence,
+                "outbox event published",
+                outbox_id=envelope.event_id,
+                tenant_id=envelope.tenant_id,
+                session_id=envelope.session_id,
+                sequence=envelope.sequence,
+                event_type=envelope.event_type,
             )
             published += 1
 
@@ -395,6 +405,13 @@ class DatabaseOutboxStore:
             )
             payload = row["payload"]
             if not isinstance(payload, dict):
+                logger.error(
+                    "outbox event payload invalid",
+                    outbox_id=int(row["event_id"]),
+                    tenant_id=int(row["tenant_id"]),
+                    session_id=int(row["session_id"]),
+                    error="payload is not an object",
+                )
                 raise OutboxPublishError(f"outbox event {row['event_id']} payload is not an object")
             return EventEnvelope(
                 event_id=int(row["event_id"]),
@@ -419,4 +436,9 @@ class DatabaseOutboxStore:
                 .values(publication_status="published", published_at=func.now())
             )
             if result.rowcount != 1:
+                logger.error(
+                    "outbox event not pending",
+                    outbox_id=event_id,
+                    error="outbox event was not pending",
+                )
                 raise OutboxPublishError(f"outbox event {event_id} was not pending")

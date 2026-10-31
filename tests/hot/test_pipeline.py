@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from loguru import logger
 from pipecat.frames.frames import (
     Frame,
@@ -19,6 +20,7 @@ from ceho.hot.config import DIRECT_SOURCE_PIPELINE, ConfigurationError
 from ceho.hot.pipeline import (
     DirectSourceContext,
     DirectSourceRun,
+    PipelineRunError,
     RunState,
     RunStopped,
     deepgram_stt,
@@ -296,3 +298,171 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.candidates, ())
         with self.assertRaisesRegex(Exception, "not accepting audio"):
             await run.push_audio(b"\x00\x00", timestamp_ms=0)
+
+
+def _fields(record: object) -> dict[str, object]:
+    fields = getattr(record, "ceho_fields", None)
+    assert isinstance(fields, dict)
+    return fields
+
+
+def test_pipeline_run_logs_start_and_stop(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(_context(), [])
+        await run.start()
+        await run.close()
+
+    asyncio.run(body())
+    records = [record for record in caplog.records if record.name == "ceho.hot.pipeline"]
+    assert [record.msg for record in records] == ["pipeline run started", "pipeline run stopped"]
+    assert _fields(records[0])["source_id"] == "mic"
+    assert _fields(records[0])["tenant_id"] == 1
+    assert _fields(records[0])["session_id"] == 10
+    assert _fields(records[1])["state"] == "stopped"
+
+
+def test_only_a_non_empty_audio_frame_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(_context(), [])
+        await run.start()
+        await run.push_audio(b"", timestamp_ms=1000)
+        await run.push_audio(b"\x00\x00", timestamp_ms=1500)
+        await run.close()
+
+    asyncio.run(body())
+    accepted = [
+        record
+        for record in caplog.records
+        if record.name == "ceho.hot.pipeline" and record.msg == "audio frame accepted"
+    ]
+    assert len(accepted) == 1
+    assert _fields(accepted[0]) == {
+        "source_id": "mic",
+        "timestamp_ms": 1500,
+        "byte_count": 2,
+    }
+
+
+def test_audio_before_start_is_logged_and_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(_context(), [])
+        with pytest.raises(PipelineRunError, match="not accepting audio"):
+            await run.push_audio(b"\x00\x00", timestamp_ms=10)
+
+    asyncio.run(body())
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ceho.hot.pipeline" and record.msg == "audio frame rejected"
+    ]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert _fields(records[0])["source_id"] == "mic"
+    assert _fields(records[0])["error"] == "pipeline run is not accepting audio"
+
+
+def test_odd_pcm_length_is_logged_and_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(_context(), [])
+        await run.start()
+        try:
+            with pytest.raises(PipelineRunError, match="whole samples"):
+                await run.push_audio(b"\x00", timestamp_ms=10)
+        finally:
+            await run.close()
+
+    asyncio.run(body())
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ceho.hot.pipeline" and record.msg == "audio frame rejected"
+    ]
+    assert len(records) == 1
+    assert _fields(records[0])["error"] == "PCM length must cover whole samples"
+
+
+def test_second_start_is_logged_and_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("ERROR", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(_context(), [])
+        await run.start()
+        try:
+            with pytest.raises(PipelineRunError, match="cannot start"):
+                await run.start()
+        finally:
+            await run.close()
+
+    asyncio.run(body())
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ceho.hot.pipeline" and record.msg == "pipeline run rejected"
+    ]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert _fields(records[0])["error"] == "pipeline run cannot start"
+
+
+def test_provider_error_inside_the_budget_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(
+            _context(),
+            [ScriptedSTT([_transcription("hello", start=0.0, duration=0.2)], errors=1)],
+        )
+        await run.start()
+        await run.push_audio(b"\x00\x00", timestamp_ms=1000)
+        await run.close()
+
+    asyncio.run(body())
+    records = [record for record in caplog.records if record.name == "ceho.hot.pipeline"]
+    warnings = [record for record in records if record.msg == "stt provider error"]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert _fields(warnings[0])["source_id"] == "mic"
+    assert _fields(warnings[0])["error"] == "provider unavailable"
+    assert _fields(warnings[0])["fatal"] is False
+    assert not any(record.msg == "pipeline run failed" for record in records)
+    assert all("hello" not in record.msg for record in records)
+    assert all("hello" not in str(getattr(record, "ceho_fields", "")) for record in records)
+
+
+def test_fatal_provider_error_fails_the_run(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.pipeline")
+
+    async def body() -> None:
+        run = DirectSourceRun(
+            _context(),
+            [
+                ScriptedSTT(
+                    [_transcription("secret phrase", start=0.0, duration=0.2)],
+                    errors=DIRECT_SOURCE_PIPELINE.max_provider_failures,
+                )
+            ],
+        )
+        await run.start()
+        await run.push_audio(b"\x00\x00", timestamp_ms=1000)
+        stopped = await run.close()
+        assert stopped.state is RunState.FAILED
+
+    asyncio.run(body())
+    records = [record for record in caplog.records if record.name == "ceho.hot.pipeline"]
+    warnings = [record for record in records if record.msg == "stt provider error"]
+    assert [bool(_fields(record)["fatal"]) for record in warnings] == [False, False, True]
+    failures = [record for record in records if record.msg == "pipeline run failed"]
+    assert len(failures) == 1
+    assert failures[0].levelname == "ERROR"
+    assert _fields(failures[0])["error"] == "provider unavailable"
+    assert _fields(failures[0])["source_id"] == "mic"
+    assert all("secret phrase" not in record.msg for record in records)
+    assert all("secret phrase" not in str(getattr(record, "ceho_fields", "")) for record in records)

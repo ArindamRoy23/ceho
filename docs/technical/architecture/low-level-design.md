@@ -479,6 +479,16 @@ Cold consumers should use durable projections and indexes before adding caches. 
 
 Correlate every session, peer, source, pipeline run, transcript transaction, media object, and outbox event in structured logs and metrics.
 
+### Logging
+
+Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only logger. `ceho.hot.server:main` calls `configure` once before settings, the database engine, or uvicorn. `configure` loads `.env` without overriding the process environment, then reads `CEHO_LOG_LEVEL` (default `INFO`). The value must be `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. Any other value stops startup with `CEHO_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL`.
+
+`configure` writes one UTF-8 JSON object per line to stderr and attaches that same handler to the `ceho`, uvicorn, and SQLAlchemy loggers. Pipecat logs through loguru; `configure` sends that stream through the same line. `main` starts uvicorn with `log_config=None` so uvicorn does not install a second format.
+
+`ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
+
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, and a critical line when startup configuration or the listen socket fails. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py`, `transport.py`, and `webrtc.py` have no lifecycle yet, so they do not log.
+
 Minimum metrics:
 
 - active sessions, peers, sources, and pipeline runs;
@@ -524,7 +534,9 @@ with `uv run python -m ceho.hot.server` after `.env` is present.
 environment. Variables already set in the process stay in place.
 
 The process listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`)
-and exposes `GET /health`. Startup validates `DATABASE_URL`,
+and exposes `GET /health`. `main` calls `ceho.logging.configure` before reading
+settings. `CEHO_LOG_LEVEL` (default `INFO`) selects which log calls are emitted.
+Startup validates `DATABASE_URL`,
 `CEHO_MEDIA_STORAGE_URI` (`s3://` bucket), `CEHO_S3_ACCESS_KEY_ID`,
 `CEHO_S3_SECRET_ACCESS_KEY`, `CEHO_S3_REGION` (default `us-east-1`),
 `CEHO_SIGNALING_SECRET`, and `CEHO_EVENT_PUBLISHER_URL`.
