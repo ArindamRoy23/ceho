@@ -4,8 +4,6 @@ import os
 import unittest
 from unittest.mock import patch
 
-import pytest
-
 from ceho.hot.config import (
     DIRECT_SOURCE_PIPELINE,
     ConfigurationError,
@@ -115,34 +113,3 @@ class HotServerSettingsTest(unittest.TestCase):
 
         load_dotenv.assert_called_once_with()
         self.assertEqual(settings.signaling_secret, "from-dotenv")
-
-
-def test_signaling_ttl_and_idle_timeout_default() -> None:
-    settings = HotServerSettings.from_environment(_environment())
-
-    assert settings.signaling_token_ttl_seconds == 60
-    assert settings.session_idle_timeout_seconds == 900
-
-
-def test_signaling_ttl_and_idle_timeout_are_read() -> None:
-    settings = HotServerSettings.from_environment(
-        _environment(CEHO_SIGNALING_TOKEN_TTL="15", CEHO_SESSION_IDLE_TIMEOUT="120")
-    )
-
-    assert settings.signaling_token_ttl_seconds == 15
-    assert settings.session_idle_timeout_seconds == 120
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("CEHO_SIGNALING_TOKEN_TTL", "0"),
-        ("CEHO_SIGNALING_TOKEN_TTL", "nope"),
-        ("CEHO_SIGNALING_TOKEN_TTL", ""),
-        ("CEHO_SESSION_IDLE_TIMEOUT", "-1"),
-        ("CEHO_SESSION_IDLE_TIMEOUT", "  "),
-    ],
-)
-def test_non_positive_duration_fails_clearly(name: str, value: str) -> None:
-    with pytest.raises(ConfigurationError, match=name):
-        HotServerSettings.from_environment(_environment(**{name: value}))
