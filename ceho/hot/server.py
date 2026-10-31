@@ -200,11 +200,18 @@ def _session_factory(app: FastAPI) -> sessionmaker[DbSession]:
     factory = app.state.session_factory
     if factory is not None:
         return factory
-    engine = create_engine(app.state.settings.database_url)
+    engine = create_engine(_psycopg_url(app.state.settings.database_url))
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     app.state.engine = engine
     app.state.session_factory = factory
     return factory
+
+
+def _psycopg_url(database_url: str) -> str:
+    """Use the installed psycopg driver for a plain postgresql URL."""
+    if database_url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + database_url.removeprefix("postgresql://")
+    return database_url
 
 
 def _call(action: Callable[[], T]) -> T:

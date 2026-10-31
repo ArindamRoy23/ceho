@@ -523,6 +523,8 @@ and exposes `GET /health`. Startup validates `DATABASE_URL`,
 `CEHO_MEDIA_STORAGE_URI` (`s3://` bucket), `CEHO_S3_ACCESS_KEY_ID`,
 `CEHO_S3_SECRET_ACCESS_KEY`, `CEHO_S3_REGION` (default `us-east-1`),
 `CEHO_SIGNALING_SECRET`, and `CEHO_EVENT_PUBLISHER_URL`.
+A `postgresql://` URL stays in the environment. The server and Alembic open it
+as `postgresql+psycopg://`.
 `CEHO_SIGNALING_TOKEN_TTL` defaults to 60 seconds and `CEHO_SESSION_IDLE_TIMEOUT`
 defaults to 900 seconds. A blank or non-positive value fails startup.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.

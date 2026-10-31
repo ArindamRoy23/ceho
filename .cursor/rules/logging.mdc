@@ -1,0 +1,112 @@
+---
+description: Shared logger, five levels always in the source, and one JSON line
+alwaysApply: true
+---
+
+# Logging
+
+Every module under `ceho/` logs through `ceho.logging`. The five standard
+levels are written on the path that needs them and stay in the source.
+`CEHO_LOG_LEVEL` chooses which of those calls are emitted. A later debug
+session raises the level; it does not add the calls.
+
+The formatter builds the line only after the level check. Pass values as
+fields so a silenced DEBUG call stays a level check.
+
+## Import
+
+```python
+from ceho.logging import get_logger
+
+logger = get_logger(__name__)
+```
+
+That import is the only logger used in `ceho/` and in tests. Bind it once
+at module scope. Pass `__name__` so the `logger` field is the module path.
+
+`ceho.logging.configure` is the only place that sets the level, the handler,
+and the format. Each process entrypoint calls it once before other work
+(`ceho.hot.server:main`, and any later entrypoint). Other modules leave the
+handler alone.
+
+`configure` attaches uvicorn, SQLAlchemy, and Pipecat to that same handler
+and the same line, so the process has one format.
+
+## Five levels
+
+Use only `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`. Write the call
+on the path itself, with no `if` on the level or on a debug flag around it.
+
+A module that starts, stops, branches, or talks to another system ships all
+five in the same change:
+
+| Level | Call it when |
+| --- | --- |
+| DEBUG | The branch, size, timing, id, or per-frame fact that explains a later failure |
+| INFO | A lifecycle step succeeded: process up or down, session create, join, or end, pipeline run start or stop, outbox publish |
+| WARNING | Work continued degraded: retry, dropped frame, provider error still inside the failure budget, idle sweep error |
+| ERROR | This operation failed and the caller sees the failure. Inside `except`, call `logger.exception` |
+| CRITICAL | The process cannot keep serving and is exiting: startup configuration rejected, listen socket failed |
+
+Per-frame and per-chunk facts go to DEBUG. They are in the source for a
+later session and stay quiet at the default INFO level.
+
+When a module cannot itself exit the process, its failure is ERROR, and the
+CRITICAL call lives in the entrypoint that exits. A pure function with no
+state transition and no failure mode does not log. A placeholder line that
+exists only to fill a level is not a log.
+
+## Call shape
+
+The message is a static phrase: lowercase, no trailing period, no
+interpolated values. Keyword arguments become JSON fields.
+
+```python
+logger.debug(
+    "audio frame accepted",
+    source_id=context.source_id,
+    timestamp_ms=timestamp_ms,
+    byte_count=len(pcm),
+)
+logger.info("session started", tenant_id=tenant_id, session_id=session.id)
+logger.warning(
+    "stt provider error",
+    source_id=context.source_id,
+    error=message,
+    fatal=fatal,
+)
+logger.exception("pipeline run failed", source_id=context.source_id)
+logger.critical("hot server exiting", error=str(error))
+```
+
+Reuse these field names: `tenant_id`, `session_id`, `peer_id`, `source_id`,
+`pipeline_run_id`, `transcript_id`, `media_id`, `outbox_id`. Add `error` for
+a short failure string. `logger.exception` and `exc_info=True` add `exc`.
+
+Log the id that points at the row. Leave out credentials, bearer tokens,
+signing secrets, API keys, password hashes, raw audio, and transcript text.
+
+## Line format
+
+`configure` writes one UTF-8 JSON object per line to stderr. `ts`, `level`,
+`logger`, and `msg` are always present, in that order. Call fields follow,
+sorted by name. `exc` is last when the call carried an exception.
+
+```json
+{"ts":"2026-10-31T09:12:03.018Z","level":"INFO","logger":"ceho.hot.session","msg":"session started","session_id":42,"tenant_id":1}
+```
+
+- `ts` is UTC, ISO-8601, millisecond precision, `Z` suffix.
+- `level` is `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.
+- `logger` is the `__name__` passed to `get_logger`.
+- `msg` is the static phrase. Identical events share it, so a query can group them.
+- `exc` is `{"type","msg","trace"}`.
+
+The default level is `INFO`. `CEHO_LOG_LEVEL` overrides it. An unknown value
+fails startup with `CEHO_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL`.
+
+## Tests
+
+Assert a log when the log is the contract, including a provenance gap. Use
+pytest `caplog` on the `ceho.*` logger name. Leave `configure` uncalled
+except in a test that asserts the JSON line.
