@@ -21,7 +21,10 @@ from ceho.hot.outbox import (
     publish_pending,
     transcript_created_payload,
 )
+from ceho.logging import get_logger
 from ceho.models import Base, MediaObject, OutboxEvent, Session, SessionSpeaker, Transcript
+
+logger = get_logger(__name__)
 
 
 class TranscriptFinalizeError(Exception):
@@ -94,9 +97,32 @@ def finalize_transcript(
     outbox ``sequence`` are allocated in SQL. When ``publisher`` is given, pending
     events are pushed after the commit. A bus failure leaves the row pending.
     """
-    _validate(command)
-    with connection.begin():
-        finalized = _commit(connection, command)
+    try:
+        _validate(command)
+        with connection.begin():
+            finalized = _commit(connection, command)
+    except TranscriptFinalizeError as error:
+        logger.error(
+            "transcript rejected",
+            tenant_id=command.tenant_id,
+            session_id=command.session_id,
+            error=str(error),
+        )
+        raise
+    except Exception:
+        logger.exception(
+            "transcript commit failed",
+            tenant_id=command.tenant_id,
+            session_id=command.session_id,
+        )
+        raise
+    logger.info(
+        "transcript committed",
+        tenant_id=finalized.tenant_id,
+        session_id=finalized.session_id,
+        outbox_id=finalized.event_id,
+        turn_index=finalized.turn_index,
+    )
     if publisher is not None:
         publish_pending(
             DatabaseOutboxStore(
@@ -177,6 +203,13 @@ def _commit(connection: Connection, command: FinalizeTranscript) -> FinalizedTra
     session_speaker_id = _session_speaker(connection, command)
     _require_media(connection, command)
     turn_index = _next_number(connection, _table(Transcript).c.turn_index, command)
+    logger.debug(
+        "transcript commit started",
+        tenant_id=command.tenant_id,
+        session_id=command.session_id,
+        turn_index=turn_index,
+        media_present=command.media_object_id is not None,
+    )
     start_at = session["started_at"] + timedelta(milliseconds=command.start_ms)
     end_at = session["started_at"] + timedelta(milliseconds=command.end_ms)
     transcripts = _table(Transcript)

@@ -12,7 +12,6 @@ diarization, language model, or speech synthesizer.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -35,8 +34,9 @@ from ceho.hot.config import (
     ConfigurationError,
     DirectSourcePipelineConfig,
 )
+from ceho.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PipelineRunError(RuntimeError):
@@ -213,6 +213,11 @@ class DirectSourceRun:
         terminal. The hot server owns its own shutdown.
         """
         if self._state is not RunState.IDLE or self._close_started:
+            logger.error(
+                "pipeline run rejected",
+                source_id=self._context.source_id,
+                error="pipeline run cannot start",
+            )
             raise PipelineRunError("pipeline run cannot start")
         pipeline = Pipeline([*self._processors, _FinalCandidateSink(self)])
         task = PipelineTask(
@@ -244,6 +249,12 @@ class DirectSourceRun:
             name=f"direct-source-{self._context.source_id}",
         )
         self._state = RunState.RUNNING
+        logger.info(
+            "pipeline run started",
+            tenant_id=self._context.tenant_id,
+            session_id=self._context.session_id,
+            source_id=self._context.source_id,
+        )
 
     async def push_audio(self, pcm: bytes, *, timestamp_ms: int) -> None:
         """Queue one contiguous chunk of 16 kHz 16-bit mono PCM.
@@ -252,10 +263,20 @@ class DirectSourceRun:
         chunk's timestamp is the origin for provider-relative speech intervals.
         """
         if self._state is not RunState.RUNNING or self._close_started or self._task is None:
+            logger.error(
+                "audio frame rejected",
+                source_id=self._context.source_id,
+                error="pipeline run is not accepting audio",
+            )
             raise PipelineRunError("pipeline run is not accepting audio")
         if not pcm:
             return
         if len(pcm) % self._config.sample_width != 0:
+            logger.error(
+                "audio frame rejected",
+                source_id=self._context.source_id,
+                error="PCM length must cover whole samples",
+            )
             raise PipelineRunError("PCM length must cover whole samples")
         if self._origin_ms is None:
             self._origin_ms = timestamp_ms
@@ -265,6 +286,12 @@ class DirectSourceRun:
                 sample_rate=self._config.sample_rate,
                 num_channels=self._config.channels,
             )
+        )
+        logger.debug(
+            "audio frame accepted",
+            source_id=self._context.source_id,
+            timestamp_ms=timestamp_ms,
+            byte_count=len(pcm),
         )
 
     async def close(self) -> RunStopped:
@@ -281,6 +308,14 @@ class DirectSourceRun:
             if self._state is RunState.RUNNING:
                 self._state = RunState.STOPPED
             self._accepting_candidates = False
+            if self._state is not RunState.IDLE:
+                logger.info(
+                    "pipeline run stopped",
+                    tenant_id=self._context.tenant_id,
+                    session_id=self._context.session_id,
+                    source_id=self._context.source_id,
+                    state=self._state.value,
+                )
         else:
             await self._finish_run_task()
         return RunStopped(self._context, self._state)
@@ -325,7 +360,18 @@ class DirectSourceRun:
             self._accepting_candidates = False
             self._state = RunState.FAILED
         self._failures.append(PipelineFailure(self._context, message, fatal))
-        logger.warning("STT provider error for source %s: %s", self._context.source_id, message)
+        logger.warning(
+            "stt provider error",
+            source_id=self._context.source_id,
+            error=message,
+            fatal=fatal,
+        )
+        if fatal:
+            logger.error(
+                "pipeline run failed",
+                source_id=self._context.source_id,
+                error=message,
+            )
         if fatal and self._task is not None and not self._cancel_sent:
             self._cancel_sent = True
             await self._task.cancel(reason=message)
@@ -345,7 +391,7 @@ class DirectSourceRun:
         self._accepting_candidates = False
         self._state = RunState.FAILED
         self._failures.append(PipelineFailure(self._context, message, True))
-        logger.warning("Pipeline run failed for source %s: %s", self._context.source_id, message)
+        logger.exception("pipeline run failed", source_id=self._context.source_id)
 
 
 def deepgram_stt(
