@@ -276,6 +276,10 @@ hosts for Postgres and MinIO are in
 [local development](local-development.md); this section is the implemented
 shape and the remaining schema work.
 
+Alembic autogenerate and `alembic check` compare only the `ceho_core` schema.
+Extensions such as pgmq own their schemas, and `public` holds
+`alembic_version`.
+
 ### Current state
 
 Implemented in `ceho_core`:

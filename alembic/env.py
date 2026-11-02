@@ -6,7 +6,7 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-from ceho.models import Base
+from ceho.models import SCHEMA, Base
 
 config = context.config
 
@@ -25,6 +25,13 @@ def database_url() -> str:
     return url
 
 
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    # Extensions such as pgmq own their schemas. Autogenerate would drop them.
+    if type_ == "schema":
+        return name == SCHEMA
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=database_url(),
@@ -32,6 +39,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=True,
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -54,6 +62,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=True,
+            include_name=include_name,
         )
 
         with context.begin_transaction():
