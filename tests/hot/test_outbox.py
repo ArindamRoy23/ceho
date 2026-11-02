@@ -24,7 +24,7 @@ from ceho.hot.outbox import (
 )
 from ceho.hot.session import FinalizeTranscript, finalize_transcript
 from ceho.models import OutboxEvent
-from tests.hot.conftest import ActiveSession
+from tests.hot.conftest import ActiveSession, as_table
 
 OCCURRED_AT = datetime(2026, 10, 31, 9, 0, tzinfo=timezone.utc)
 
@@ -79,7 +79,7 @@ class RecordingOutbox:
                 other.envelope.tenant_id == envelope.tenant_id
                 and other.envelope.session_id == envelope.session_id
                 and other.envelope.sequence < envelope.sequence
-                and other.status != "published"
+                and other.status == "pending"
                 for other in self.rows
             )
             if not earlier_unpublished:
@@ -443,6 +443,59 @@ def test_database_publishes_an_earlier_session_event_before_the_transcript(
         ("transcript.created", 1),
     ]
     assert messages[1].envelope.event_id == finalized.event_id
+
+
+def test_database_publishes_past_a_failed_earlier_event(
+    active_session: ActiveSession,
+) -> None:
+    outbox = as_table(OutboxEvent)
+    with active_session.connect() as connection:
+        with connection.begin():
+            failed_id = insert_outbox_event(
+                connection,
+                tenant_id=active_session.tenant_id,
+                session_id=active_session.session_id,
+                event_type="session.created",
+                sequence=0,
+                payload={"hello": "session"},
+            )
+            connection.execute(
+                outbox.update()
+                .where(outbox.c.event_id == failed_id)
+                .values(publication_status="failed")
+            )
+            pending_id = insert_outbox_event(
+                connection,
+                tenant_id=active_session.tenant_id,
+                session_id=active_session.session_id,
+                event_type="session.ended",
+                sequence=1,
+                payload={"bye": "session"},
+            )
+    publisher = _Publisher()
+
+    with active_session.connect() as connection:
+        published = publish_pending(
+            DatabaseOutboxStore(
+                connection,
+                tenant_id=active_session.tenant_id,
+                session_id=active_session.session_id,
+            ),
+            publisher,
+        )
+
+    assert published == 1
+    assert publisher.sent == [(active_session.session_id, 1, pending_id)]
+
+
+def test_failed_event_is_not_sent_and_does_not_block_the_session() -> None:
+    failed = _Row(_envelope(event_id=1, session_id=10, sequence=0))
+    failed.status = "failed"
+    store = RecordingOutbox([failed, _Row(_envelope(event_id=2, session_id=10, sequence=1))])
+    publisher = _Publisher()
+
+    assert publish_pending(store, publisher) == 1
+    assert publisher.sent == [(10, 1, 2)]
 
 
 def _fields(record: object) -> dict[str, object]:

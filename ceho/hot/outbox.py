@@ -287,6 +287,7 @@ def publish_pending(store: OutboxStore, publisher: EventPublisher) -> int:
     A send or completion failure leaves that session's head row pending and
     does not publish a later sequence for the session on this pass. Other
     sessions continue. The same ``event_id`` is sent again on a later pass.
+    A ``failed`` row is a dead letter: it is not sent and does not block.
     """
     with _publish_lock:
         published = 0
@@ -356,7 +357,7 @@ class DatabaseOutboxStore:
                     earlier.c.tenant_id == outbox.c.tenant_id,
                     earlier.c.session_id == outbox.c.session_id,
                     earlier.c.sequence < outbox.c.sequence,
-                    earlier.c.publication_status != "published",
+                    earlier.c.publication_status == "pending",
                 )
             ),
         ]
