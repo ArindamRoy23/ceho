@@ -287,11 +287,19 @@ Implemented in `ceho_core`:
 - `outbox_events`
 - the `pgmq` extension, enabled in the devcontainer Postgres image. `pgmq://<name>` publishes there. See https://github.com/pgmq/pgmq
 
+Identity columns use a sequence named `<table>_<column>_seq`. A text column is nullable unless the row means nothing without it, and every text column rejects a blank value. `tenants.name` is optional.
+
 Not implemented yet: mapping status and source identity on `session_speakers`.
+
+### Channels
+
+`channel_name` is required and unique per tenant. A tenant channel cannot reuse a name from the generic catalog (tenant 1), and the catalog cannot take a name a tenant already uses. `channels_reject_generic_name_shadow` checks both directions and takes a transaction advisory lock on the name, so two concurrent inserts cannot both pass.
 
 ### Users
 
-`users` is the platform login account. `password_hash` is null or an Argon2id
+`users` is the platform login account. `email` is required, stored trimmed and
+lowercased, and unique per tenant. `display_name` is null or non-blank.
+`password_hash` is null or an Argon2id
 encoded hash, which begins with `$argon2id$` and already carries the salt and
 parameters. The plaintext password is not stored. An account that signs in
 only through an identity provider leaves `password_hash` null.
@@ -306,7 +314,8 @@ tokens and refresh tokens are not stored here.
 
 ### Speakers
 
-`speakers` is a voice that can be attributed. `external_ids` holds channel
+`speakers` is a voice that can be attributed. `display_name` is null or
+non-blank. `external_ids` holds channel
 identifiers in the same JSON shape. `user_id` is nullable. Deleting the
 platform user sets `user_id` to null and leaves the speaker row.
 
@@ -322,10 +331,17 @@ A session speaker is the transcript's speaker attribute. One known speaker can
 have several peers over time, and an observed voice may have no speaker row
 yet. Mapping status and source identity remain open.
 
+A session speaker that a transcript names cannot be deleted on its own.
+`transcripts_speaker_fkey` is `NO ACTION` and deferred, so the check runs at
+commit. Deleting the session still cascades to the speaker and its transcripts
+together, because both are gone before the check.
+
 ### Media objects
 
 `media_objects` belongs to one tenant and session. `storage_uri` is the
-server-owned S3 location of the bytes. Local development points that URI at
+server-owned S3 location of the bytes, required, non-blank, and unique across
+the table. `content_type`, `codec`, and `checksum` are null or non-blank.
+Local development points that URI at
 MinIO; cloud deployment uses the same `s3://` shape without a custom endpoint.
 
 `write_status` is `open`, `complete`, or `failed`. A complete object must have
@@ -336,8 +352,9 @@ decision below.
 
 ### Transcripts
 
-Final text, session-timeline timestamps, and `turn_index` are stored. The
-speaker attribute is `session_speaker_id`. A transcript may also
+Final text, session-timeline timestamps, and `turn_index` are stored. `text`
+is required and non-blank. The speaker attribute is `session_speaker_id`.
+A transcript may also
 reference one media object in the same tenant and session, with
 `media_start_offset_ms` and `media_end_offset_ms`. The reference and both
 offsets are all present or all absent. Deleting the media row is restricted
@@ -362,6 +379,10 @@ is `published`. The hot-server process publishes pending rows through the
 publisher selected by `CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` calls
 `pgmq.send` on the queue named by that URL. A row that cannot be sent stays
 `pending`.
+
+A `pending` row cannot be deleted. The delete trigger also fires when a
+session delete cascades, so a session with a pending event stays. Mark the
+event `published` or `failed` first. Those rows delete with the session.
 
 `publisher_from_url` is the switch. A later bus is another scheme in that
 function, still accepting one `EventEnvelope` per call. The outbox table stays

@@ -71,7 +71,9 @@ class HotPathSchemaTest(unittest.TestCase):
             [column.name for column in foreign_key.columns],
             ["tenant_id", "session_id", "session_speaker_id"],
         )
-        self.assertEqual(foreign_key.ondelete, "CASCADE")
+        self.assertEqual(foreign_key.ondelete, "NO ACTION")
+        self.assertTrue(foreign_key.deferrable)
+        self.assertEqual(foreign_key.initially, "DEFERRED")
         self.assertFalse(transcripts.c.session_speaker_id.nullable)
         self.assertNotIn("session_user_id", transcripts.c)
 
