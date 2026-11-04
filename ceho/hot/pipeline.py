@@ -15,7 +15,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 from pipecat.frames.frames import (
     ErrorFrame,
@@ -41,6 +41,16 @@ logger = get_logger(__name__)
 
 class PipelineRunError(RuntimeError):
     """Raised when a pipeline run is used outside its lifecycle."""
+
+
+class DirectSourceRecorder(Protocol):
+    """PCM sink for one direct source. The run does not import storage."""
+
+    async def accept(self, pcm: bytes, *, timestamp_ms: int) -> None:
+        """Queue one chunk. Raise when recording must stop the source."""
+
+    async def finish(self) -> None:
+        """Flush the recording and persist its terminal state."""
 
 
 class RunState(Enum):
@@ -168,9 +178,11 @@ class DirectSourceRun:
         processors: Sequence[FrameProcessor],
         *,
         config: DirectSourcePipelineConfig = DIRECT_SOURCE_PIPELINE,
+        recorder: DirectSourceRecorder | None = None,
     ) -> None:
         self._context = context
         self._config = config
+        self._recorder = recorder
         self._processors = tuple(processors)
         self._state = RunState.IDLE
         self._accepting_candidates = True
@@ -280,6 +292,16 @@ class DirectSourceRun:
             raise PipelineRunError("PCM length must cover whole samples")
         if self._origin_ms is None:
             self._origin_ms = timestamp_ms
+        if self._recorder is not None:
+            try:
+                await self._recorder.accept(pcm, timestamp_ms=timestamp_ms)
+            except Exception as error:
+                message = str(error) or "recording failed"
+                self._record_fatal(message)
+                if self._task is not None and not self._cancel_sent:
+                    self._cancel_sent = True
+                    await self._task.cancel(reason=message)
+                raise PipelineRunError("recording failed") from error
         await self._task.queue_frame(
             InputAudioRawFrame(
                 audio=pcm,
@@ -302,6 +324,11 @@ class DirectSourceRun:
         """
         if not self._close_started:
             self._close_started = True
+            if self._recorder is not None:
+                try:
+                    await self._recorder.finish()
+                except Exception as error:
+                    self._record_fatal(str(error) or "recording failed")
             if self._state is RunState.RUNNING and self._task is not None:
                 await self._task.stop_when_done()
             await self._finish_run_task()

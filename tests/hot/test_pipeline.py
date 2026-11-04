@@ -114,6 +114,23 @@ class Marker(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class _MemoryRecorder:
+    """In-memory stand-in for the durable recorder."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.chunks: list[tuple[bytes, int]] = []
+        self.finished = 0
+
+    async def accept(self, pcm: bytes, *, timestamp_ms: int) -> None:
+        if self.fail:
+            raise RuntimeError("recording failed")
+        self.chunks.append((pcm, timestamp_ms))
+
+    async def finish(self) -> None:
+        self.finished += 1
+
+
 class PipelineContractTest(unittest.TestCase):
     """Verify the candidate contract without running a pipeline task."""
 
@@ -286,6 +303,32 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(run.failures), 1)
         self.assertFalse(run.failures[0].fatal)
         self.assertIs(stopped.state, RunState.STOPPED)
+
+    async def test_push_audio_hands_each_chunk_to_the_recorder_before_close(self) -> None:
+        recorder = _MemoryRecorder()
+        run = DirectSourceRun(_context(), [], recorder=recorder)
+        await run.start()
+        await run.push_audio(b"\x01\x02", timestamp_ms=50)
+        await run.close()
+
+        self.assertEqual(recorder.chunks, [(b"\x01\x02", 50)])
+        self.assertEqual(recorder.finished, 1)
+
+    async def test_recording_failure_does_not_enter_speech_to_text(self) -> None:
+        marker = Marker()
+        recorder = _MemoryRecorder(fail=True)
+        run = DirectSourceRun(_context(), [marker], recorder=recorder)
+        await run.start()
+
+        with self.assertRaisesRegex(PipelineRunError, "recording failed"):
+            await run.push_audio(b"\x00\x00", timestamp_ms=0)
+        stopped = await asyncio.wait_for(run.close(), timeout=5)
+
+        self.assertFalse(marker.saw_audio)
+        self.assertEqual(recorder.chunks, [])
+        self.assertEqual(recorder.finished, 1)
+        self.assertIs(stopped.state, RunState.FAILED)
+        self.assertFalse(stopped.ends_session)
 
     async def test_source_closure_stops_the_run_without_ending_the_session(self) -> None:
         context = _context()

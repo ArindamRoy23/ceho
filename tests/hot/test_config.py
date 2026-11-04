@@ -9,6 +9,7 @@ from ceho.hot.config import (
     ConfigurationError,
     DirectSourcePipelineConfig,
     HotServerSettings,
+    RecordingConfig,
 )
 
 
@@ -72,6 +73,31 @@ class HotServerSettingsTest(unittest.TestCase):
         self.assertEqual(audio.max_provider_failures, 3)
         self.assertEqual(audio.frame_bytes(20), 640)
         self.assertEqual(DIRECT_SOURCE_PIPELINE, audio)
+
+    def test_recording_bounds_default_to_a_bounded_queue_and_five_mebibyte_parts(self) -> None:
+        recording = RecordingConfig()
+
+        self.assertEqual(recording.max_queued_bytes, 1024 * 1024)
+        self.assertEqual(recording.max_queued_age_ms, 15_000)
+        self.assertEqual(recording.part_bytes, 5 * 1024 * 1024)
+
+    def test_recording_queue_must_hold_at_least_one_byte(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError, "recording queue must hold at least one byte"
+        ):
+            RecordingConfig(max_queued_bytes=0)
+
+    def test_recording_queue_age_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError, "recording queue age must be at least 1 ms"
+        ):
+            RecordingConfig(max_queued_age_ms=0)
+
+    def test_recording_part_size_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError, "recording part size must be at least 1 byte"
+        ):
+            RecordingConfig(part_bytes=0)
 
     def test_deepgram_api_key_is_optional(self) -> None:
         settings = HotServerSettings.from_environment(_environment())

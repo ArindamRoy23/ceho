@@ -249,6 +249,8 @@ A final provider result becomes a `TranscriptCandidate` when the trimmed text is
 
 Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller passes each final candidate to `finalize_transcript`.
 
+A caller that owns a connected direct source injects a `DirectSourceRecorder`. `push_audio` hands the chunk to that recorder after the PCM checks and before the frame is queued for speech-to-text. A recording failure cancels the run. `close()` finishes the recorder. The recorder implementation lives in `media.py`. The transcribe harness does not inject one.
+
 ### Speaker handling
 
 For a direct authenticated source, the server has a strong candidate for the originating session speaker. The direct-source STT run does not insert `session_speakers`. `finalize_transcript` does, in the same transaction as the transcript. The first final turn from a source omits `session_speaker_id` and creates one row in that session. Later finals from the same source pass the returned id and reuse it. A different source creates its own row as its speech arrives. Each session has its own session speakers.
@@ -397,15 +399,17 @@ replacement for their projections or queues.
 
 ## Media recording and provenance
 
-CEHO records source audio for transcript playback and provenance. Recording storage must be durable and shared across hot-server instances: object storage or a deliberately operated shared filesystem. A pod or server's local filesystem is not acceptable.
+CEHO records source audio for transcript playback and provenance. Recording storage is a shared S3 bucket: `CEHO_MEDIA_STORAGE_URI`. Local development points that bucket at MinIO. A pod or server's local filesystem is not a recording destination.
 
-Recording receives frames asynchronously from the media path. It cannot block ingestion or STT processing indefinitely. Before implementation, select one recording-failure policy:
+One direct-source attachment is one multipart upload and one `media_objects` row. A later attachment, including a reconnect, opens another object. The recorder chooses the key `{tenant_id}/{session_id}/{source_id}/{uuid}.pcm`. The caller cannot choose it. Chunks are concatenated in accept order. Part numbers follow that order. A part is uploaded at 5 MiB, and finish uploads the shorter tail. The object is `audio/L16`, `pcm_s16le`, at the direct-source sample rate and channel count.
 
-- reject or stop the affected session;
-- continue transcription but create a provenance-gap record; or
-- retain a bounded temporary buffer and stop recording once its limit is reached.
+`accept` places each chunk on an in-process `asyncio` queue and returns. A writer task started on the first chunk uploads parts. The queue holds at most 1 MiB and the oldest chunk may wait at most 15 seconds. Those bounds are `RecordingConfig`. Past either bound, or when a part upload fails twice, the recorder aborts the upload, sets `write_status = failed`, and raises. `push_audio` then stops that source. The session row stays active. `finish` on a failed recording leaves the failed row and raises.
 
-The system emits an operational event or log for every provenance gap. Retention, encryption, legal hold, access control, and deletion propagation are still open decisions.
+The database is touched twice: the open insert, and the complete or fail update. The connection is not held across an upload. Completion stores `media_started_at`, `media_ended_at`, `byte_length`, and `checksum` (`sha256:` plus the hex digest of the raw PCM). The timeline starts at `session.started_at` plus the first chunk's session timestamp. The end is that start plus the duration of the accepted bytes. A source that closes with no audio writes nothing.
+
+`provenance(start_ms, end_ms)` returns the media id and the offsets from the first recorded sample. The caller passes that trio to `finalize_transcript`. The lookup is valid while the row is still open. An interval outside the accepted audio is rejected.
+
+The S3 client stays behind `ObjectStorage`. Tests use a fake. Retention, encryption, legal hold, access control, and deletion propagation remain open.
 
 ## Final transcript transaction
 
@@ -480,7 +484,7 @@ A transcript is not durable until its transaction commits. If PostgreSQL is unav
 
 ### Recording failure
 
-Recording failure follows the selected policy and is never silent. Every committed transcript affected by a provenance gap must be identifiable.
+A recording failure stops that source. The media row is `failed`, the multipart upload is aborted, and `media.py` logs the failure. The session stays active. A transcript that already committed provenance points at that row, so a failed object stays identifiable. `close()` still finishes the recorder.
 
 ## Scaling and cache decisions
 
@@ -512,7 +516,7 @@ Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only lo
 
 `ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
 
-`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, and a critical line when startup configuration or the listen socket fails. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py`, `transport.py`, and `webrtc.py` have no lifecycle yet, so they do not log.
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, and a critical line when startup configuration or the listen socket fails. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` and `webrtc.py` have no lifecycle yet, so they do not log.
 
 Minimum metrics:
 
@@ -572,8 +576,9 @@ present and used only to construct the direct-source Deepgram STT processor.
 `CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` is the pgmq queue. Any other
 scheme fails at startup until `publisher_from_url` grows a branch for it. With
 an engine configured, the process drains pending outbox rows about once a
-second. This foundation does not record audio yet. Package layout for later
-hot-path modules is under [Target package structure](#target-package-structure).
+second. A connected direct source is recorded when the caller injects a
+`DirectSourceRecorder`. The server does not attach one yet. Package layout for
+later hot-path modules is under [Target package structure](#target-package-structure).
 
 ## Implementation sequence
 
@@ -581,7 +586,7 @@ hot-path modules is under [Target package structure](#target-package-structure).
 2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
 3. Implement the transport port and WebRTC adapter.
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
-5. Implement recording to durable shared/object storage.
+5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The server does not attach the recorder until a direct source is connected.
 6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.
 7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals and the `pgmq://` publisher. Session create and end insert their own outbox rows when that lifecycle is built. Another publisher scheme remains a branch in `publisher_from_url`.
 8. Validate direct-source attribution, then diarization for mixed sources.
@@ -595,8 +600,6 @@ hot-path modules is under [Target package structure](#target-package-structure).
 - The first direct-source graph is Deepgram STT with no VAD, diarization, LLM, or talkback. Whether later sources insert VAD, and which Deepgram model stays configured, remain open. The candidate contract stays fixed.
 - Whether diarization runs for every direct source or only channels that may mix speakers. -- Later feature Idea
 - Initial codec, frame duration, timestamp conversion, and maximum sources per session.
-- The recording-failure policy.
-- How source audio is written to S3: decide the incremental write model first (multipart upload, append segments, or one object per segment). Only after that is fixed should `media_objects` write-state transitions and any DB update cadence be finalized. The schema already allows `write_status` `open` → `complete`/`failed` and stores a server-owned `storage_uri`; the uploader and when the row is updated are still open.
 - Raw-audio retention, encryption, deletion, and access control.
 - Idle/reconnect timing and the supported in-progress-speech loss window.
 - Which publisher scheme follows `pgmq`. The outbox and `EventPublisher` stay; a new scheme is added in `publisher_from_url`.
