@@ -276,6 +276,10 @@ hosts for Postgres and MinIO are in
 [local development](local-development.md); this section is the implemented
 shape and the remaining schema work.
 
+Alembic autogenerate and `alembic check` compare only the `ceho_core` schema.
+Extensions such as pgmq own their schemas, and `public` holds
+`alembic_version`.
+
 ### Current state
 
 Implemented in `ceho_core`:
@@ -438,7 +442,7 @@ There is no `transcript.updated` event until CEHO persists revisions.
 
 The transaction that creates/ends a session or commits a transcript also inserts an outbox record. It does not call the bus. `publish_pending` runs in the hot-server process. After a finalize commit, that session's pending rows are pushed immediately when the caller supplies a publisher. The server lifespan also calls `publish_pending` about once a second for every pending row, including once at startup. `create_app` without an engine does not connect to PostgreSQL.
 
-`pending` means the row is committed and has not been accepted by the publisher. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. For `pgmq`, the send is `pgmq.send`. The oldest pending `sequence` in a session is eligible only when every smaller sequence is published. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
+`pending` means the row is committed and has not been accepted by the publisher. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. For `pgmq`, the send is `pgmq.send`. The oldest pending `sequence` in a session is eligible only when no smaller sequence is still `pending`. `failed` is a dead letter: an operator's terminal decision not to publish that event. It is never sent and does not block later sequences, so consumers can see a gap in a session's `sequence`. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
 
 `pgmq.read` claims messages in `msg_id` order and hides them for the visibility timeout. A message that is not archived or deleted in that window can be read again. `pgmq.archive` moves it to that queue's archive table. Consumers still dedupe on `event_id`: a crash after send and before `published` sends the same event again.
 
