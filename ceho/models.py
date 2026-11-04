@@ -20,11 +20,12 @@ the media object and millisecond interval that support that turn.
 
 Media objects store server-owned S3 locations for source audio. Outbox events
 live in this schema so a domain write and its event can commit together. The
-outbox identity and payload are immutable after insert. The pgmq extension,
+outbox identity and payload are immutable after insert. A pending outbox
+event cannot be deleted, so a session delete stops while one remains. The pgmq
+extension,
 not a mapped table, holds the queue those events are published to.
 
-The design DDL in docs/technical/architecture/ceho_core/ddl matches these
-classes. These classes are the schema source of truth.
+These classes are the schema source of truth.
 """
 
 from datetime import datetime
@@ -90,6 +91,60 @@ CREATE TRIGGER outbox_events_reject_mutation
     FOR EACH ROW EXECUTE FUNCTION ceho_core.reject_outbox_event_mutation()
 """
 
+REJECT_PENDING_OUTBOX_DELETE_FUNCTION = """
+CREATE OR REPLACE FUNCTION ceho_core.reject_pending_outbox_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.publication_status = 'pending' THEN
+        RAISE EXCEPTION 'pending outbox event cannot be deleted';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+"""
+
+REJECT_PENDING_OUTBOX_DELETE_TRIGGER = """
+CREATE TRIGGER outbox_events_reject_pending_delete
+    BEFORE DELETE ON ceho_core.outbox_events
+    FOR EACH ROW EXECUTE FUNCTION ceho_core.reject_pending_outbox_delete()
+"""
+
+# A channel name is a catalog name. Tenant 1 is the generic catalog, so a
+# private channel cannot reuse one of its names, and neither can the catalog
+# reuse a name a tenant already has. The lock stops two inserts racing.
+REJECT_GENERIC_CHANNEL_NAME_SHADOW_FUNCTION = f"""
+CREATE OR REPLACE FUNCTION ceho_core.reject_generic_channel_name_shadow()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.channel_name, 0));
+    IF NEW.tenant_id = {GENERIC_TENANT_ID} THEN
+        IF EXISTS (
+            SELECT 1 FROM ceho_core.channels
+            WHERE tenant_id <> {GENERIC_TENANT_ID} AND channel_name = NEW.channel_name
+        ) THEN
+            RAISE EXCEPTION 'generic channel name % is already used by a tenant', NEW.channel_name;
+        END IF;
+    ELSIF EXISTS (
+        SELECT 1 FROM ceho_core.channels
+        WHERE tenant_id = {GENERIC_TENANT_ID} AND channel_name = NEW.channel_name
+    ) THEN
+        RAISE EXCEPTION 'channel name % shadows a generic channel', NEW.channel_name;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+"""
+
+REJECT_GENERIC_CHANNEL_NAME_SHADOW_TRIGGER = """
+CREATE TRIGGER channels_reject_generic_name_shadow
+    BEFORE INSERT OR UPDATE OF tenant_id, channel_name ON ceho_core.channels
+    FOR EACH ROW EXECUTE FUNCTION ceho_core.reject_generic_channel_name_shadow()
+"""
+
 
 def updated_at_trigger_statements(table_names: tuple[str, ...]) -> tuple[str, ...]:
     """Build BEFORE UPDATE triggers for the named tables.
@@ -130,9 +185,12 @@ def _identity() -> Mapped[int]:
 
 class Tenant(Timestamped, Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint("name IS NULL OR btrim(name) <> ''", name="tenants_name_check"),
+    )
 
     tenant_id: Mapped[int] = _identity()
-    name: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
 
 
 class Channel(Timestamped, Base):
@@ -143,6 +201,7 @@ class Channel(Timestamped, Base):
             [f"{SCHEMA}.tenants.tenant_id"],
             name="channels_tenant_id_fkey",
         ),
+        CheckConstraint("btrim(channel_name) <> ''", name="channels_channel_name_check"),
         UniqueConstraint("tenant_id", "channel_id", name="channels_tenant_channel_unique"),
         UniqueConstraint("tenant_id", "channel_name", name="channels_tenant_name_unique"),
     )
@@ -162,6 +221,14 @@ class User(Timestamped, Base):
             name="users_password_hash_check",
         ),
         CheckConstraint(
+            "email = lower(btrim(email)) AND email ~ '^[^@[:space:]]+@[^@[:space:]]+$'",
+            name="users_email_check",
+        ),
+        CheckConstraint(
+            "display_name IS NULL OR btrim(display_name) <> ''",
+            name="users_display_name_check",
+        ),
+        CheckConstraint(
             "jsonb_typeof(external_ids) = 'object'",
             name="users_external_ids_object_check",
         ),
@@ -171,13 +238,15 @@ class User(Timestamped, Base):
             name="users_tenant_id_fkey",
         ),
         UniqueConstraint("tenant_id", "user_id", name="users_tenant_user_unique"),
+        UniqueConstraint("tenant_id", "email", name="users_tenant_email_unique"),
         # GIN supports containment lookups such as provider -> subject.
         Index("users_external_ids_gin_idx", "external_ids", postgresql_using="gin"),
     )
 
     user_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text)
     password_hash: Mapped[str | None] = mapped_column(Text)
     external_ids: Mapped[dict[str, object]] = mapped_column(
         JSONB,
@@ -191,6 +260,10 @@ class Speaker(Timestamped, Base):
 
     __tablename__ = "speakers"
     __table_args__ = (
+        CheckConstraint(
+            "display_name IS NULL OR btrim(display_name) <> ''",
+            name="speakers_display_name_check",
+        ),
         CheckConstraint(
             "jsonb_typeof(external_ids) = 'object'",
             name="speakers_external_ids_object_check",
@@ -214,7 +287,7 @@ class Speaker(Timestamped, Base):
 
     speaker_id: Mapped[int] = _identity()
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text)
     external_ids: Mapped[dict[str, object]] = mapped_column(
         JSONB,
         nullable=False,
@@ -226,6 +299,10 @@ class Speaker(Timestamped, Base):
 class Session(Timestamped, Base):
     __tablename__ = "sessions"
     __table_args__ = (
+        CheckConstraint(
+            "session_description IS NULL OR btrim(session_description) <> ''",
+            name="sessions_session_description_check",
+        ),
         CheckConstraint("status IN ('active', 'ended')", name="sessions_status_check"),
         CheckConstraint(
             "(status = 'active' AND ended_at IS NULL) "
@@ -317,6 +394,7 @@ class SessionSpeaker(Timestamped, Base):
 class Transcript(Timestamped, Base):
     __tablename__ = "transcripts"
     __table_args__ = (
+        CheckConstraint("btrim(text) <> ''", name="transcripts_text_check"),
         CheckConstraint("turn_index >= 0", name="transcripts_turn_index_check"),
         CheckConstraint("end_at >= start_at", name="transcripts_time_check"),
         ForeignKeyConstraint(
@@ -332,8 +410,13 @@ class Transcript(Timestamped, Base):
                 f"{SCHEMA}.session_speakers.session_id",
                 f"{SCHEMA}.session_speakers.session_speaker_id",
             ],
+            # Deferred, so deleting the session can cascade to the speaker and
+            # the transcript together. A direct speaker delete still fails
+            # while a transcript names it.
             name="transcripts_speaker_fkey",
-            ondelete="CASCADE",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         CheckConstraint(
             "(media_object_id IS NULL AND media_start_offset_ms IS NULL "
@@ -403,6 +486,19 @@ class MediaObject(Timestamped, Base):
             "OR media_ended_at >= media_started_at",
             name="media_objects_interval_check",
         ),
+        CheckConstraint("btrim(storage_uri) <> ''", name="media_objects_storage_uri_check"),
+        CheckConstraint(
+            "content_type IS NULL OR btrim(content_type) <> ''",
+            name="media_objects_content_type_check",
+        ),
+        CheckConstraint(
+            "codec IS NULL OR btrim(codec) <> ''",
+            name="media_objects_codec_check",
+        ),
+        CheckConstraint(
+            "checksum IS NULL OR btrim(checksum) <> ''",
+            name="media_objects_checksum_check",
+        ),
         CheckConstraint(
             "write_status <> 'complete' OR ("
             "content_type IS NOT NULL AND codec IS NOT NULL AND sample_rate_hz IS NOT NULL "
@@ -422,6 +518,7 @@ class MediaObject(Timestamped, Base):
             "media_object_id",
             name="media_objects_tenant_session_object_unique",
         ),
+        UniqueConstraint("storage_uri", name="media_objects_storage_uri_unique"),
     )
 
     media_object_id: Mapped[int] = _identity()

@@ -22,7 +22,7 @@ from ceho.hot.session import (
     finalize_transcript,
 )
 from ceho.models import Base, MediaObject, OutboxEvent, Session, SessionSpeaker, Transcript
-from tests.hot.conftest import ActiveSession, as_table
+from tests.conftest import ActiveSession, as_table
 
 
 class _RejectingConnection:
