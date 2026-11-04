@@ -93,6 +93,28 @@ DIRECT_SOURCE_PIPELINE = DirectSourcePipelineConfig()
 
 
 @dataclass(frozen=True)
+class RecordingConfig:
+    """Bounds for one direct-source recording queue and its S3 part size.
+
+    The queue is in-process. ``part_bytes`` is the multipart part size. The
+    S3 adapter rejects a part smaller than 5 MiB. Tests can use a smaller
+    part with a fake store.
+    """
+
+    max_queued_bytes: int = 1024 * 1024
+    max_queued_age_ms: int = 15_000
+    part_bytes: int = 5 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.max_queued_bytes < 1:
+            raise ConfigurationError("recording queue must hold at least one byte")
+        if self.max_queued_age_ms < 1:
+            raise ConfigurationError("recording queue age must be at least 1 ms")
+        if self.part_bytes < 1:
+            raise ConfigurationError("recording part size must be at least 1 byte")
+
+
+@dataclass(frozen=True)
 class HotServerSettings:
     """Validated configuration needed before the hot server can start."""
 

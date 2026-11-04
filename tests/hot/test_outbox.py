@@ -24,7 +24,7 @@ from ceho.hot.outbox import (
 )
 from ceho.hot.session import FinalizeTranscript, finalize_transcript
 from ceho.models import OutboxEvent
-from tests.hot.conftest import ActiveSession, as_table
+from tests.conftest import ActiveSession, as_table
 
 OCCURRED_AT = datetime(2026, 10, 31, 9, 0, tzinfo=timezone.utc)
 
