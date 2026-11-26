@@ -115,6 +115,29 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class TransportQueueConfig:
+    """Bounds for one direct-source inbound media queue.
+
+    The queue holds at most ``max_queued_frames`` frames and a frame may wait
+    at most ``max_frame_age_ms``. Past either bound, the oldest frame is
+    dropped and the loss is reported. A frame larger than ``max_frame_bytes``
+    is not queued. The queue never grows without a bound.
+    """
+
+    max_queued_frames: int = 50
+    max_frame_age_ms: int = 1_000
+    max_frame_bytes: int = 64 * 1024
+
+    def __post_init__(self) -> None:
+        if self.max_queued_frames < 1:
+            raise ConfigurationError("transport queue must hold at least one frame")
+        if self.max_frame_age_ms < 1:
+            raise ConfigurationError("transport frame age must be at least 1 ms")
+        if self.max_frame_bytes < 1:
+            raise ConfigurationError("transport frame size must be at least 1 byte")
+
+
+@dataclass(frozen=True)
 class HotServerSettings:
     """Validated configuration needed before the hot server can start."""
 
