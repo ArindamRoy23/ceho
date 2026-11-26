@@ -16,6 +16,7 @@ from ceho.hot.signaling import (
     issue_signaling_credential,
     read_signaling_credential,
 )
+from ceho.hot.turn import IceRelay
 from tests.hot.conftest import MemoryControlStore, hot_settings
 
 NOW = datetime(2026, 11, 26, 5, 0, tzinfo=timezone.utc)
@@ -61,8 +62,18 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+class _Turn:
+    def mint(self, *, ttl_seconds: int) -> IceRelay:
+        return IceRelay(
+            stun_url="stun:stun.cloudflare.com:3478",
+            turn_url="turns:turn.cloudflare.com:443?transport=tcp",
+            username="turn-user",
+            password="turn-pass",
+        )
+
+
 def _app(store: MemoryControlStore) -> TestClient:
-    app = create_app(hot_settings(), control_store=store, now=lambda: NOW)
+    app = create_app(hot_settings(), control_store=store, now=lambda: NOW, turn=_Turn())
     return TestClient(app)
 
 

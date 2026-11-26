@@ -75,6 +75,20 @@ def _positive_seconds(name: str, environment: Mapping[str, str], default: int) -
     return value
 
 
+def _ice_url(
+    name: str,
+    environment: Mapping[str, str],
+    default: str,
+    schemes: frozenset[str],
+) -> str:
+    value = environment.get(name, default).strip()
+    parsed = urlparse(value)
+    host = parsed.hostname or parsed.path.split("?", 1)[0].split("/")[0]
+    if parsed.scheme not in schemes or not host:
+        raise ConfigurationError(f"{name} must be an absolute URI")
+    return value
+
+
 def _port_value(environment: Mapping[str, str]) -> int:
     value = environment.get("CEHO_PORT", "8000")
     try:
@@ -126,6 +140,29 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class TransportQueueConfig:
+    """Bounds for one direct-source inbound media queue.
+
+    The queue holds at most ``max_queued_frames`` frames and a frame may wait
+    at most ``max_frame_age_ms``. Past either bound, the oldest frame is
+    dropped and the loss is reported. A frame larger than ``max_frame_bytes``
+    is not queued. The queue never grows without a bound.
+    """
+
+    max_queued_frames: int = 50
+    max_frame_age_ms: int = 1_000
+    max_frame_bytes: int = 64 * 1024
+
+    def __post_init__(self) -> None:
+        if self.max_queued_frames < 1:
+            raise ConfigurationError("transport queue must hold at least one frame")
+        if self.max_frame_age_ms < 1:
+            raise ConfigurationError("transport frame age must be at least 1 ms")
+        if self.max_frame_bytes < 1:
+            raise ConfigurationError("transport frame size must be at least 1 byte")
+
+
+@dataclass(frozen=True)
 class HotServerSettings:
     """Validated configuration needed before the hot server can start."""
 
@@ -143,6 +180,11 @@ class HotServerSettings:
     control_credential_ttl_seconds: int = 900
     signaling_credential_ttl_seconds: int = 60
     session_idle_timeout_seconds: int = 900
+    stun_url: str = "stun:stun.cloudflare.com:3478"
+    turn_url: str = "turns:turn.cloudflare.com:443?transport=tcp"
+    turn_key_id: str = ""
+    turn_api_token: str = ""
+    turn_ttl_seconds: int = 60
     deepgram_api_key: str | None = None
 
     @property
@@ -184,5 +226,20 @@ class HotServerSettings:
             ),
             host=source.get("CEHO_HOST", "127.0.0.1"),
             port=_port_value(source),
+            stun_url=_ice_url(
+                "CEHO_STUN_URL",
+                source,
+                "stun:stun.cloudflare.com:3478",
+                frozenset({"stun", "stuns"}),
+            ),
+            turn_url=_ice_url(
+                "CEHO_TURN_URL",
+                source,
+                "turns:turn.cloudflare.com:443?transport=tcp",
+                frozenset({"turn", "turns"}),
+            ),
+            turn_key_id=_required_value("CEHO_TURN_KEY_ID", source),
+            turn_api_token=_required_value("CEHO_TURN_API_TOKEN", source),
+            turn_ttl_seconds=_positive_seconds("CEHO_TURN_TTL_SECONDS", source, 60),
             deepgram_api_key=_optional_value("DEEPGRAM_API_KEY", source),
         )

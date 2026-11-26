@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, TypeVar
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Request
@@ -44,6 +46,15 @@ from ceho.hot.session import (
     end_session,
     join_session,
 )
+from ceho.hot.signaling import (
+    SignalingCredentialError,
+    SignalingGrant,
+    authorize_signaling,
+    read_signaling_credential,
+)
+from ceho.hot.transport import AuthorizedSessionBinding, SignalingError, TransportError
+from ceho.hot.turn import CloudflareTurn, IceRelay, TurnMint, TurnUnavailable
+from ceho.hot.webrtc import DirectSourceWebRTC, WebRTCPeer, ice_servers_for
 from ceho.logging import configure, get_logger
 
 logger = get_logger(__name__)
@@ -77,6 +88,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        live = list(app.state.peers.values())
+        for peer in live:
+            await peer.adapter.close()
+        watches = [peer.watch for peer in live if peer.watch is not None]
+        if watches:
+            await asyncio.gather(*watches, return_exceptions=True)
         logger.info(
             "hot server stopped",
             host=app.state.settings.host,
@@ -108,6 +125,8 @@ def create_app(
     login_accounts: LoginAccounts | None = None,
     control_store: ControlStore | None = None,
     now: Callable[[], datetime] | None = None,
+    turn: TurnMint | None = None,
+    peer_factory: Callable[[IceRelay], WebRTCPeer] | None = None,
 ) -> FastAPI:
     """Create a configured CEHO hot-server ASGI application."""
     active_settings = settings or HotServerSettings.from_environment()
@@ -119,6 +138,16 @@ def create_app(
     app.state.control_store = control_store
     app.state.presence = PresenceBook()
     app.state.now = now or (lambda: datetime.now(timezone.utc))
+    app.state.turn = turn or CloudflareTurn(
+        active_settings.turn_key_id,
+        active_settings.turn_api_token,
+        stun_url=active_settings.stun_url,
+        turn_url=active_settings.turn_url,
+    )
+    app.state.peer_factory = peer_factory or _peer_with_relay
+    app.state.peers = {}
+    app.state.next_peer = 1
+    app.state.peer_lock = asyncio.Lock()
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -151,7 +180,7 @@ def create_app(
         issued = await _run(
             lambda: _open_session(request.app, principal, body),
         )
-        return _opened(issued)
+        return await _opened(request.app, issued)
 
     @app.post("/sessions/{session_id}/join")
     async def join(
@@ -163,7 +192,7 @@ def create_app(
         issued = await _run(
             lambda: _join_session(request.app, principal, session_id),
         )
-        return _opened(issued)
+        return await _opened(request.app, issued)
 
     @app.post("/sessions/{session_id}/end")
     async def end(
@@ -174,6 +203,52 @@ def create_app(
         principal = _principal(request)
         ended = await _run(lambda: _end_session(request.app, principal, session_id))
         return _SessionEnded(session_id=ended.session_id, status=ended.status)
+
+    @app.post("/sessions/{session_id}/offer")
+    async def offer(
+        session_id: Annotated[int, Path(gt=0)],
+        body: _OfferBody,
+        request: Request,
+    ) -> _Answer:
+        """Accept one microphone offer and return the SDP answer."""
+        grant = _signaling_grant(request)
+        try:
+            authorize_signaling(
+                grant,
+                tenant_id=grant.tenant_id,
+                session_id=session_id,
+                channel_tenant_id=grant.channel_tenant_id,
+                channel_id=grant.channel_id,
+            )
+        except SignalingCredentialError as error:
+            raise HTTPException(status_code=401, detail=str(error)) from None
+        session = await _run(
+            lambda: _load_session(request.app, grant.tenant_id, session_id),
+        )
+        if session is None:
+            logger.error(
+                "signaling rejected",
+                reason="session_missing",
+                tenant_id=grant.tenant_id,
+                session_id=session_id,
+            )
+            raise HTTPException(status_code=404, detail="session does not exist")
+        if session.status != "active":
+            logger.error(
+                "signaling rejected",
+                reason="session_ended",
+                tenant_id=grant.tenant_id,
+                session_id=session_id,
+            )
+            raise HTTPException(status_code=409, detail="session has ended")
+        logger.debug(
+            "offer started",
+            tenant_id=grant.tenant_id,
+            session_id=session_id,
+        )
+        relay = await _mint(request.app)
+        answer = await _accept_offer(request.app, grant, relay, body.sdp)
+        return _Answer(sdp=answer, type="answer")
 
     return app
 
@@ -193,11 +268,30 @@ class _CreateSessionBody(BaseModel):
 
 
 class _SessionOpened(BaseModel):
-    """Session id and the signaling credential for its connection."""
+    """Session id, signaling credential, and the ICE servers for that join."""
 
     session_id: int
     signaling_credential: str
     expires_at: datetime
+    stun_url: str
+    turn_url: str
+    turn_username: str
+    turn_password: str
+
+
+class _OfferBody(BaseModel):
+    """One browser offer. The server does not interpret the SDP."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    sdp: str
+
+
+class _Answer(BaseModel):
+    """The SDP answer for the one accepted offer."""
+
+    sdp: str
+    type: str
 
 
 class _SessionEnded(BaseModel):
@@ -316,11 +410,129 @@ def _end_session(app: FastAPI, principal: ControlPrincipal, session_id: int) -> 
         )
 
 
-def _opened(issued: IssuedSession) -> _SessionOpened:
+@dataclass
+class _LivePeer:
+    adapter: DirectSourceWebRTC
+    generation: int
+    tenant_id: int
+    session_id: int
+    watch: asyncio.Task[None] | None = None
+
+
+def _peer_with_relay(relay: IceRelay) -> WebRTCPeer:
+    from ceho.hot.webrtc import SmallWebRTCPeer
+
+    return SmallWebRTCPeer(ice_servers=ice_servers_for(relay))
+
+
+def _signaling_grant(request: Request) -> SignalingGrant:
+    header = request.headers.get("Authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme != "Bearer" or not token.strip():
+        raise HTTPException(status_code=401, detail="signaling credential is missing")
+    try:
+        return read_signaling_credential(
+            token.strip(),
+            request.app.state.settings.signaling_secret,
+            now=request.app.state.now(),
+        )
+    except SignalingCredentialError as error:
+        raise HTTPException(status_code=401, detail=str(error)) from None
+
+
+def _load_session(app: FastAPI, tenant_id: int, session_id: int) -> SessionView | None:
+    with _control_store(app) as store:
+        return store.get_session(tenant_id, session_id)
+
+
+async def _mint(app: FastAPI) -> IceRelay:
+    try:
+        return await asyncio.to_thread(
+            lambda: app.state.turn.mint(ttl_seconds=app.state.settings.turn_ttl_seconds)
+        )
+    except TurnUnavailable:
+        raise HTTPException(status_code=503, detail="turn is unavailable") from None
+    except Exception:
+        logger.exception("turn credentials failed")
+        raise HTTPException(status_code=503, detail="turn is unavailable") from None
+
+
+async def _accept_offer(app: FastAPI, grant: SignalingGrant, relay: IceRelay, sdp: str) -> str:
+    key = (grant.tenant_id, grant.session_id)
+    previous = app.state.peers.get(key)
+    if previous is not None:
+        await previous.adapter.close()
+        await _release_peer(app, key, previous.generation)
+    peer_id = uuid4().hex
+    adapter = DirectSourceWebRTC(
+        AuthorizedSessionBinding(
+            tenant_id=grant.tenant_id,
+            session_id=grant.session_id,
+            peer_id=peer_id,
+            expires_at=grant.expires_at,
+        ),
+        app.state.peer_factory(relay),
+        now=app.state.now,
+    )
+    try:
+        answer = await adapter.accept_offer(sdp)
+    except SignalingError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except TransportError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    generation = app.state.next_peer
+    app.state.next_peer += 1
+    live = _LivePeer(
+        adapter=adapter,
+        generation=generation,
+        tenant_id=grant.tenant_id,
+        session_id=grant.session_id,
+    )
+    app.state.peers[key] = live
+    app.state.presence.attach(grant.tenant_id, grant.session_id)
+    live.watch = asyncio.create_task(
+        _watch_peer(app, key, generation, adapter),
+        name=f"peer-{peer_id}",
+    )
+    logger.info(
+        "offer accepted",
+        tenant_id=grant.tenant_id,
+        session_id=grant.session_id,
+        peer_id=peer_id,
+        source_id=adapter.source_id,
+    )
+    return answer
+
+
+async def _watch_peer(
+    app: FastAPI,
+    key: tuple[int, int],
+    generation: int,
+    adapter: DirectSourceWebRTC,
+) -> None:
+    await adapter.wait_closed()
+    await _release_peer(app, key, generation)
+
+
+async def _release_peer(app: FastAPI, key: tuple[int, int], generation: int) -> None:
+    async with app.state.peer_lock:
+        live = app.state.peers.get(key)
+        if live is None or live.generation != generation:
+            return
+        del app.state.peers[key]
+        app.state.presence.detach(live.tenant_id, live.session_id, app.state.now())
+
+
+async def _opened(app: FastAPI, issued: IssuedSession) -> _SessionOpened:
+    relay = await _mint(app)
     return _SessionOpened(
         session_id=issued.session.session_id,
         signaling_credential=issued.signaling_credential,
         expires_at=issued.expires_at,
+        stun_url=relay.stun_url,
+        turn_url=relay.turn_url,
+        turn_username=relay.username,
+        turn_password=relay.password,
     )
 
 
