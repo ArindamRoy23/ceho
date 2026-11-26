@@ -785,6 +785,21 @@ async def test_media_failure_is_logged_with_the_exception(caplog: pytest.LogCapt
     assert records[0].ceho_fields["peer_id"] == "peer-1"  # type: ignore[attr-defined]
 
 
+def test_ice_servers_omit_turn_when_no_relay_was_minted() -> None:
+    from ceho.hot.turn import IceRelay
+
+    relay = IceRelay(
+        stun_url="stun:stun.example:3478",
+        turn_url="",
+        username="",
+        password="",
+    )
+
+    servers = ice_servers_for(relay)
+
+    assert [server.urls for server in servers] == [relay.stun_url]
+
+
 async def test_small_webrtc_peer_gathers_with_stun_and_turn() -> None:
     from ceho.hot.turn import IceRelay
 
