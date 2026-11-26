@@ -506,6 +506,8 @@ class SmallWebRTCPeer:
         self._local_close = False
         self._failure: CloseReason | None = None
         self._detail = "media failed"
+        self._stopped = asyncio.Event()
+        self._track: Any = None
         self._connection.add_event_handler("failed", self._on_failed)
         self._connection.add_event_handler("closed", self._on_closed)
 
@@ -544,23 +546,42 @@ class SmallWebRTCPeer:
             return
         self._failure = reason
         self._detail = detail
+        track = self._track
+        if track is not None:
+            track.stop()
+        self._stopped.set()
 
     async def _frames(self) -> AsyncIterator[InboundAudio]:
         from aiortc.mediastreams import MediaStreamError
 
         await self._connection.connect()
         track = self._connection.audio_input_track()
+        self._track = track
         if track is None or self._failure is not None:
             detail = self._detail if self._failure is not None else "no audio track"
             raise SourceDisconnected(self._failure or CloseReason.MEDIA_FAILED, detail=detail)
         while True:
             if self._failure is not None:
                 raise SourceDisconnected(self._failure, detail=self._detail)
+            recv_task = asyncio.create_task(track.recv())
+            stop_task = asyncio.create_task(self._stopped.wait())
             try:
-                frame = await track.recv()
+                done, _pending = await asyncio.wait(
+                    {recv_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in (recv_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(recv_task, stop_task, return_exceptions=True)
+            if self._failure is not None:
+                raise SourceDisconnected(self._failure, detail=self._detail)
+            if recv_task not in done:
+                continue
+            try:
+                frame = recv_task.result()
             except MediaStreamError:
-                if self._failure is not None:
-                    raise SourceDisconnected(self._failure, detail=self._detail) from None
                 return
             if frame is None:
                 continue

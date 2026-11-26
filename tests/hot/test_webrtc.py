@@ -659,6 +659,58 @@ async def test_close_is_idempotent() -> None:
     assert closed[0].reason is CloseReason.SERVER_CLOSE
 
 
+async def test_a_closed_peer_unblocks_a_recv_that_never_returns() -> None:
+    from ceho.hot.transport import SourceDisconnected
+
+    class _HungTrack:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def recv(self) -> None:
+            await asyncio.Event().wait()
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class _Connection:
+        def __init__(self) -> None:
+            self.track = _HungTrack()
+            self._handlers: dict[str, list[object]] = {}
+
+        def add_event_handler(self, name: str, handler: object) -> None:
+            self._handlers.setdefault(name, []).append(handler)
+
+        async def connect(self) -> None:
+            return
+
+        def audio_input_track(self) -> _HungTrack:
+            return self.track
+
+        async def disconnect(self) -> None:
+            return
+
+        async def fire(self, name: str) -> None:
+            for handler in self._handlers.get(name, []):
+                result = handler()  # type: ignore[operator]
+                if asyncio.iscoroutine(result):
+                    await result
+
+    connection = _Connection()
+    peer = SmallWebRTCPeer(connection)  # type: ignore[arg-type]
+
+    async def read() -> None:
+        async for _frame in peer.frames():
+            return
+
+    reader = asyncio.create_task(read())
+    await asyncio.sleep(0)
+    await connection.fire("closed")
+
+    with pytest.raises(SourceDisconnected, match="peer connection closed"):
+        await asyncio.wait_for(reader, 1)
+    assert connection.track.stopped is True
+
+
 async def test_remote_disconnect_stops_delivery(caplog: pytest.LogCaptureFixture) -> None:
     from ceho.hot.transport import SourceDisconnected
 
