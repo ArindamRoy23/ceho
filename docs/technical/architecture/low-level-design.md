@@ -82,7 +82,7 @@ A **turn** is the pipeline's bounded piece of speech. In this version, only a no
 authenticated control request
         |
         v
-session + membership + short-lived join credential
+session + short-lived signaling credential
         |
         v
 WebRTC signaling and media connection
@@ -116,7 +116,8 @@ ceho/
 │   ├── __init__.py
 │   ├── server.py       # HTTP API, authorization, lifecycle, signaling
 │   ├── auth.py         # password login and control credentials
-│   ├── session.py      # session/membership persistence and finalization
+│   ├── signaling.py    # signaling credentials
+│   ├── session.py      # session persistence, lifecycle, and finalization
 │   ├── pipeline.py     # Pipecat construction and pipeline-run lifecycle
 │   ├── transport.py    # transport port and media contracts
 │   ├── webrtc.py       # first transport implementation
@@ -133,15 +134,17 @@ ceho/
 
 ### Ownership
 
-Initially, one hot-server process owns every active session. It is the only application writer of sessions, memberships, final transcripts, and outbox records.
+Initially, one hot-server process owns every active session. It is the only application writer of sessions, session speakers, final transcripts, and outbox records.
 
 When hot servers scale horizontally, this becomes a per-session ownership guarantee: exactly one instance may own and write an active session. A multi-instance deployment needs an expiring, fenced ownership lease before it routes the same session to several instances. Until that exists, deployment is single-instance.
 
 ### Tenant boundary
 
-The authenticated control request determines the tenant. The server never accepts a tenant, user, speaker, or authorization claim from an audio packet.
+The authenticated control request determines the tenant. The server never accepts a tenant, user, speaker, or authorization claim from an audio packet or from the JSON body.
 
-Every session lookup, membership lookup, media record, transcript write, and outbox event is constrained by the authenticated tenant and session. Composite foreign keys in `ceho_core` prevent child rows from referencing a parent in another tenant.
+Create, join, and end require the control credential from `POST /login` in the `Authorization: Bearer` header. The server verifies it with `CEHO_CONTROL_SECRET` and reads `user_id`, `tenant_id`, and `exp`. A signaling credential is rejected on these routes. The credential is not stored.
+
+PostgreSQL row-level security is not enabled. Each control query carries the tenant from the control credential. Composite foreign keys in `ceho_core` prevent a child row from referencing a parent in another tenant.
 
 ### Password login
 
@@ -155,40 +158,47 @@ OAuth login is unchanged. `external_ids` is not read by this route.
 
 ### Create session
 
-An authenticated caller creates a session through the control API:
+`POST /sessions` creates a session. The body carries `channel_id` and an optional `description`. It does not carry a tenant.
 
-1. Authenticate the caller and resolve its tenant.
-2. Authorize the caller to use the requested channel.
-3. Insert an active session with tenant, channel, and `started_at`.
+1. Verify the control credential. The tenant row must exist.
+2. Authorize the channel when it belongs to that tenant or to the generic tenant.
+3. Insert an active session with tenant, channel, and `started_at`. A blank description is stored as null.
 4. Leave speaker rows untouched. A session speaker is recorded when a voice is attributed or a person claims it.
-5. Insert `session.created` into the transactional outbox in the same transaction.
-6. Return the session ID and a short-lived credential for signaling or joining.
+5. Insert `session.created` into the transactional outbox in the same transaction. The outbox sequence is `0`. The payload is `tenant_id`, `session_id`, `channel_tenant_id`, `channel_id`, and `started_at`. It does not name a user or a speaker.
+6. After commit, return the session id and a signaling credential.
 
-The control request, not media traffic, creates the durable session row.
+The signaling credential is HMAC-SHA256 over a JSON body `use` = `signaling`, `tenant_id`, `session_id`, `channel_tenant_id`, `channel_id`, and `exp`. It is signed with `CEHO_SIGNALING_SECRET`. The lifetime is `CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS` and defaults to 60. It authorizes signaling for that session only. A credential is expired when the current time is at or past `exp`. It is not a control credential, and the control secret does not verify it.
+
+The control request, not media traffic, creates the durable session row. A failed commit leaves neither the session nor the outbox row. A missing channel is HTTP 404. A channel owned by another tenant is HTTP 403.
 
 ### Join and signaling
 
-Joining occurs through an authenticated control request:
+`POST /sessions/{session_id}/join` is the join and the reconnect. It uses the same control credential.
 
-1. Load the active session and authorize access within the tenant.
-2. Leave speaker rows untouched. Joining does not create a session speaker.
-3. Issue a short-lived, session-bound join credential containing the allowed session, tenant, channel, and expiry.
-4. Perform WebRTC signaling with that credential.
-5. Bind the authenticated peer established by signaling to the session.
-6. Start a pipeline run for every input audio source announced by that peer.
+1. Verify the control credential and load the session in that tenant.
+2. Reject the request when the session is missing or ended. A missing session, including one that belongs to another tenant, is HTTP 404. An ended session is HTTP 409.
+3. Leave speaker rows untouched. Joining does not create a session speaker or a new session.
+4. Issue a new signaling credential containing the allowed session, tenant, channel, and expiry.
+5. Perform WebRTC signaling with that credential.
+6. Bind the authenticated peer established by signaling to the session.
+7. Start a pipeline run for every input audio source announced by that peer.
 
-The join credential authorizes signaling only. It is not a durable authorization grant or general API credential.
+Steps 5 through 7 belong to the transport adapter. The control API stops at the signaling credential.
+
+The signaling credential authorizes signaling only. It is not a durable authorization grant or a control credential. Presented on create, join, or end, it is rejected.
 
 ### Disconnect, reconnect, and end
 
-On peer disconnect, CEHO stops the peer's pipeline runs and closes recording streams. It retains the session and any session-speaker rows.
+On peer disconnect, CEHO stops the peer's pipeline runs and closes recording streams. It retains the session and any session-speaker rows. Join does not count as a connected peer. Peer presence is in-process: the transport calls attach when a peer connects and detach when it leaves. Those calls are not HTTP routes.
 
-The same user can repeat the join flow and create a new peer for the same session. A session ends only when:
+The same client can repeat the join flow and create a new peer for the same session. A session ends only when:
 
-- an authorized caller explicitly ends it; or
-- no peers are connected for the configured idle interval.
+- an authorized caller explicitly ends it with `POST /sessions/{session_id}/end`; or
+- no peers are connected for `CEHO_SESSION_IDLE_TIMEOUT_SECONDS` seconds, default 900.
 
-Ending a session stops active pipeline runs, finalizes or marks recording state as appropriate, sets `status = ended` and `ended_at`, and inserts `session.ended` into the outbox in the same transaction.
+The process checks about every 30 seconds. The first check after startup marks sessions that already existed and does not end them on that pass, so a restart does not end a durable session before the client can join again. A session opened after startup idles from its `started_at`. A connected peer keeps the session active. The idle clock starts when the last peer leaves.
+
+Ending a session sets `status = ended` and `ended_at`, and inserts one `session.ended` outbox row in the same transaction. The payload records the reason `explicit` or `idle`, plus the tenant, session, channel, and `ended_at`. A second end is HTTP 409 and does not write another event. Ending a session stops active pipeline runs and finalizes or marks recording state as appropriate once those paths exist. This control API does not stop a pipeline.
 
 ## Transport port
 
@@ -455,7 +465,7 @@ There is no `transcript.updated` event until CEHO persists revisions.
 
 ### Publication
 
-The transaction that creates/ends a session or commits a transcript also inserts an outbox record. It does not call the bus. `publish_pending` runs in the hot-server process. After a finalize commit, that session's pending rows are pushed immediately when the caller supplies a publisher. The server lifespan also calls `publish_pending` about once a second for every pending row, including once at startup. `create_app` without an engine does not connect to PostgreSQL.
+The transaction that creates/ends a session or commits a transcript also inserts an outbox record. It does not call the bus. `publish_pending` runs in the hot-server process. After a session create, session end, or finalize commit, that session's pending rows are pushed immediately when the caller supplies a publisher. A bus failure leaves the row pending. The server lifespan also calls `publish_pending` about once a second for every pending row, including once at startup. `create_app` without an engine does not connect to PostgreSQL.
 
 `pending` means the row is committed and has not been accepted by the publisher. The claim commits `attempt_count` and `last_attempt_at` while status stays `pending`, sends outside that transaction, then sets `published` and `published_at`. For `pgmq`, the send is `pgmq.send`. The oldest pending `sequence` in a session is eligible only when no smaller sequence is still `pending`. `failed` is a dead letter: an operator's terminal decision not to publish that event. It is never sent and does not block later sequences, so consumers can see a gap in a session's `sequence`. A send or completion failure leaves the row `pending`, skips later sequences for that session on this pass, and continues other sessions. One in-process lock serializes publishers in this process.
 
@@ -511,7 +521,7 @@ The first scaling model is session affinity:
 
 Do not distribute a single active session's media processing among several hot servers initially. It would add cross-node speaker state, ordering, and backpressure coordination before session affinity is proven insufficient.
 
-No distributed cache belongs in the initial hot path. Pipeline buffers are bounded in-process state, not cache. A future lease/directory service is coordination infrastructure, not cache. Membership, transcript, media, session-end, and outbox state remain authoritative in PostgreSQL.
+No distributed cache belongs in the initial hot path. Pipeline buffers are bounded in-process state, not cache. A future lease/directory service is coordination infrastructure, not cache. Session, transcript, media, session-end, and outbox state remain authoritative in PostgreSQL.
 
 Cold consumers should use durable projections and indexes before adding caches. Any later cache includes tenant, authorization/policy version, and source revision in its key and is invalidated on deletion or access revocation.
 
@@ -527,7 +537,7 @@ Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only lo
 
 `ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
 
-`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, a critical line when startup configuration or the listen socket fails, and a login that could not reach the account directory. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` and `webrtc.py` have no lifecycle yet, so they do not log.
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, each idle sweep, a sweep failure that will be retried, a critical line when startup configuration or the listen socket fails, a login that could not reach the account directory, and a session request that failed outside the control rules. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `signaling.py` logs a rejected signaling credential and does not log the credential. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, a rejected turn, a session create, join, and end, a rejected control request, a commit failure, an idle end that lost a race, and a session event that stayed pending. It does not log credentials. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` and `webrtc.py` have no lifecycle yet, so they do not log.
 
 Minimum metrics:
 
@@ -574,7 +584,9 @@ with `uv run python -m ceho.hot.server` after `.env` is present.
 environment. Variables already set in the process stay in place.
 
 The process listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`)
-and exposes `GET /health`. `main` calls `ceho.logging.configure` before reading
+and exposes `GET /health`, `POST /login`, `POST /sessions`,
+`POST /sessions/{session_id}/join`, and `POST /sessions/{session_id}/end`.
+`main` calls `ceho.logging.configure` before reading
 settings. `CEHO_LOG_LEVEL` (default `INFO`) selects which log calls are emitted.
 Startup validates `DATABASE_URL`,
 `CEHO_MEDIA_STORAGE_URI` (`s3://` bucket), `CEHO_S3_ACCESS_KEY_ID`,
@@ -584,6 +596,10 @@ Startup validates `DATABASE_URL`,
 fails startup with `CEHO_CONTROL_SECRET must be configured`. A non-integer ttl
 fails with `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be an integer`, and a ttl
 below 1 fails with `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be at least 1`.
+`CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS` defaults to 60 and
+`CEHO_SESSION_IDLE_TIMEOUT_SECONDS` defaults to 900. A non-integer value fails
+with that setting's name and `must be an integer`. A value below 1 fails with
+that setting's name and `must be at least 1`.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
 present and used only to construct the direct-source Deepgram STT processor.
@@ -591,19 +607,20 @@ present and used only to construct the direct-source Deepgram STT processor.
 `CEHO_EVENT_PUBLISHER_URL`. `pgmq://<name>` is the pgmq queue. Any other
 scheme fails at startup until `publisher_from_url` grows a branch for it. With
 an engine configured, the process drains pending outbox rows about once a
-second. A connected direct source is recorded when the caller injects a
-`DirectSourceRecorder`. The server does not attach one yet. Package layout for
+second and ends idle sessions about every 30 seconds. A connected direct
+source is recorded when the caller injects a `DirectSourceRecorder`. The
+server does not attach one yet. Package layout for
 later hot-path modules is under [Target package structure](#target-package-structure).
 
 ## Implementation sequence
 
-1. Define the control API and authentication/join-credential contract. Password login is done: `POST /login` returns a control credential signed with `CEHO_CONTROL_SECRET`. Session create, join, reconnect, end, and the signaling join credential are not routes yet.
+1. ~~Define the control API and authentication/join-credential contract.~~ Done: password login, and create, join, reconnect, and end. The signaling credential is HMAC-SHA256 signed with `CEHO_SIGNALING_SECRET`. WebRTC binding remains step 3.
 2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
 3. Implement the transport port and WebRTC adapter.
-4. Implement session creation, joining, reconnect, explicit end, and idle termination.
+4. ~~Implement session creation, joining, reconnect, explicit end, and idle termination.~~ Done in the control API. Stopping pipelines on end waits for the transport adapter.
 5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The server does not attach the recorder until a direct source is connected.
 6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.
-7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals and the `pgmq://` publisher. Session create and end insert their own outbox rows when that lifecycle is built. Another publisher scheme remains a branch in `publisher_from_url`.
+7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals, session create, session end, and the `pgmq://` publisher. Another publisher scheme remains a branch in `publisher_from_url`.
 8. Validate direct-source attribution, then diarization for mixed sources.
 9. Add observability and staged load tests before estimating capacity.
 10. Design ownership leases before deploying more than one hot-server instance.
@@ -616,7 +633,7 @@ later hot-path modules is under [Target package structure](#target-package-struc
 - Whether diarization runs for every direct source or only channels that may mix speakers. -- Later feature Idea
 - Initial codec, frame duration, timestamp conversion, and maximum sources per session.
 - Raw-audio retention, encryption, deletion, and access control.
-- Idle/reconnect timing and the supported in-progress-speech loss window.
+- The supported in-progress-speech loss window after a peer disconnects. Idle termination defaults to 900 seconds (`CEHO_SESSION_IDLE_TIMEOUT_SECONDS`).
 - Which publisher scheme follows `pgmq`. The outbox and `EventPublisher` stay; a new scheme is added in `publisher_from_url`.
 - Numeric resource limits and SLOs, based on load tests.
 - The ownership-lease implementation for multi-instance hot servers.
