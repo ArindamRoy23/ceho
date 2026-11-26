@@ -25,7 +25,7 @@ from ceho.hot.auth import (
     authenticate,
     read_control_credential,
 )
-from ceho.hot.config import ConfigurationError, HotServerSettings
+from ceho.hot.config import ConfigurationError, HotServerSettings, turn_credential_pair
 from ceho.hot.outbox import (
     OUTBOX_POLL_INTERVAL_SECONDS,
     DatabaseOutboxStore,
@@ -53,7 +53,7 @@ from ceho.hot.signaling import (
     read_signaling_credential,
 )
 from ceho.hot.transport import AuthorizedSessionBinding, SignalingError, TransportError
-from ceho.hot.turn import CloudflareTurn, IceRelay, TurnMint, TurnUnavailable
+from ceho.hot.turn import CloudflareTurn, IceRelay, StunOnlyTurn, TurnMint, TurnUnavailable
 from ceho.hot.webrtc import DirectSourceWebRTC, WebRTCPeer, ice_servers_for
 from ceho.logging import configure, get_logger
 
@@ -138,12 +138,7 @@ def create_app(
     app.state.control_store = control_store
     app.state.presence = PresenceBook()
     app.state.now = now or (lambda: datetime.now(timezone.utc))
-    app.state.turn = turn or CloudflareTurn(
-        active_settings.turn_key_id,
-        active_settings.turn_api_token,
-        stun_url=active_settings.stun_url,
-        turn_url=active_settings.turn_url,
-    )
+    app.state.turn = turn or _turn_from_settings(active_settings)
     app.state.peer_factory = peer_factory or _peer_with_relay
     app.state.peers = {}
     app.state.next_peer = 1
@@ -417,6 +412,20 @@ class _LivePeer:
     tenant_id: int
     session_id: int
     watch: asyncio.Task[None] | None = None
+
+
+def _turn_from_settings(settings: HotServerSettings) -> TurnMint:
+    pair = turn_credential_pair(settings.turn_key_id, settings.turn_api_token)
+    if pair is None:
+        logger.info("turn not configured", stun_url=settings.stun_url)
+        return StunOnlyTurn(settings.stun_url)
+    key_id, api_token = pair
+    return CloudflareTurn(
+        key_id,
+        api_token,
+        stun_url=settings.stun_url,
+        turn_url=settings.turn_url,
+    )
 
 
 def _peer_with_relay(relay: IceRelay) -> WebRTCPeer:

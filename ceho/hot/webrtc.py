@@ -589,16 +589,19 @@ class SmallWebRTCPeer:
 
 
 def ice_servers_for(relay: IceRelay) -> list[RTCIceServer]:
-    """STUN and TURN servers for one minted relay.
+    """STUN, plus TURN when this relay carries a username and password.
 
     The TURN entry carries the short-lived username and password. The answer
     gathers against these servers, so it can include a server-reflexive address
-    or a relay candidate.
+    or a relay candidate. A relay minted without Cloudflare credentials contributes
+    only the STUN server.
     """
-    return [
-        RTCIceServer(urls=relay.stun_url),
-        RTCIceServer(urls=relay.turn_url, username=relay.username, credential=relay.password),
-    ]
+    servers = [RTCIceServer(urls=relay.stun_url)]
+    if relay.turn_url and relay.username and relay.password:
+        servers.append(
+            RTCIceServer(urls=relay.turn_url, username=relay.username, credential=relay.password)
+        )
+    return servers
 
 
 def _pcm_frame(frame: Any) -> InboundAudio:

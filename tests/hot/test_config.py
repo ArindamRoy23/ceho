@@ -210,6 +210,17 @@ def test_session_duration_settings_fail_clearly(name: str, value: str) -> None:
         HotServerSettings.from_environment(_environment(**{name: value}))
 
 
+def test_turn_credentials_are_optional() -> None:
+    environment = _environment()
+    del environment["CEHO_TURN_KEY_ID"]
+    del environment["CEHO_TURN_API_TOKEN"]
+
+    settings = HotServerSettings.from_environment(environment)
+
+    assert settings.turn_key_id is None
+    assert settings.turn_api_token is None
+
+
 def test_cloudflare_ice_urls_default_and_turn_ttl_defaults_to_one_minute() -> None:
     settings = HotServerSettings.from_environment(
         _environment(CEHO_TURN_KEY_ID="key-1", CEHO_TURN_API_TOKEN="token-1")

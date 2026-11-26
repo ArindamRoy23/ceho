@@ -42,6 +42,23 @@ def _s3_uri(name: str, environment: Mapping[str, str]) -> str:
     return value
 
 
+def turn_credential_pair(key_id: str | None, api_token: str | None) -> tuple[str, str] | None:
+    """Return a Cloudflare TURN key and token, or nothing when both are unset.
+
+    One value without the other is a configuration error. The names in the
+    message are the environment variables the operator sets.
+    """
+    key = (key_id or "").strip()
+    token = (api_token or "").strip()
+    if not key and not token:
+        return None
+    if not key:
+        raise ConfigurationError("CEHO_TURN_KEY_ID must be configured")
+    if not token:
+        raise ConfigurationError("CEHO_TURN_API_TOKEN must be configured")
+    return key, token
+
+
 def _optional_value(name: str, environment: Mapping[str, str]) -> str | None:
     value = environment.get(name, "").strip()
     return value or None
@@ -182,8 +199,8 @@ class HotServerSettings:
     session_idle_timeout_seconds: int = 900
     stun_url: str = "stun:stun.cloudflare.com:3478"
     turn_url: str = "turns:turn.cloudflare.com:443?transport=tcp"
-    turn_key_id: str = ""
-    turn_api_token: str = ""
+    turn_key_id: str | None = None
+    turn_api_token: str | None = None
     turn_ttl_seconds: int = 60
     deepgram_api_key: str | None = None
 
@@ -205,6 +222,9 @@ class HotServerSettings:
             source: Mapping[str, str] = os.environ
         else:
             source = environment
+        turn_key_id = _optional_value("CEHO_TURN_KEY_ID", source)
+        turn_api_token = _optional_value("CEHO_TURN_API_TOKEN", source)
+        turn_credential_pair(turn_key_id, turn_api_token)
         return cls(
             database_url=_url_value("DATABASE_URL", source),
             media_storage_uri=_s3_uri("CEHO_MEDIA_STORAGE_URI", source),
@@ -238,8 +258,8 @@ class HotServerSettings:
                 "turns:turn.cloudflare.com:443?transport=tcp",
                 frozenset({"turn", "turns"}),
             ),
-            turn_key_id=_required_value("CEHO_TURN_KEY_ID", source),
-            turn_api_token=_required_value("CEHO_TURN_API_TOKEN", source),
+            turn_key_id=turn_key_id,
+            turn_api_token=turn_api_token,
             turn_ttl_seconds=_positive_seconds("CEHO_TURN_TTL_SECONDS", source, 60),
             deepgram_api_key=_optional_value("DEEPGRAM_API_KEY", source),
         )
