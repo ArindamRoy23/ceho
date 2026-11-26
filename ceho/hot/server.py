@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.engine import Engine
 
+from ceho.hot.auth import (
+    AuthenticationError,
+    ControlCredential,
+    DatabaseLoginAccounts,
+    LoginAccounts,
+    LoginUnavailable,
+    authenticate,
+)
 from ceho.hot.config import ConfigurationError, HotServerSettings
 from ceho.hot.outbox import (
     OUTBOX_POLL_INTERVAL_SECONDS,
@@ -74,6 +84,8 @@ def create_app(
     *,
     engine: Engine | None = None,
     publisher: EventPublisher | None = None,
+    login_accounts: LoginAccounts | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     """Create a configured CEHO hot-server ASGI application."""
     active_settings = settings or HotServerSettings.from_environment()
@@ -81,13 +93,72 @@ def create_app(
     app.state.settings = active_settings
     app.state.engine = engine
     app.state.publisher = publisher
+    app.state.login_accounts = login_accounts
+    app.state.now = now or (lambda: datetime.now(timezone.utc))
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         """Report that the configured application can serve requests."""
         return {"status": "ok"}
 
+    @app.post("/login")
+    async def login(body: _LoginBody) -> _LoginResponse:
+        """Prove a platform password and return a control credential."""
+        try:
+            issued = await asyncio.to_thread(_perform_login, app, body.email, body.password)
+        except AuthenticationError:
+            raise HTTPException(status_code=401, detail="login rejected") from None
+        except LoginUnavailable:
+            raise HTTPException(status_code=503, detail="login is unavailable") from None
+        except Exception:
+            logger.exception("login failed")
+            raise HTTPException(status_code=503, detail="login is unavailable") from None
+        return _LoginResponse(
+            credential=issued.credential,
+            expires_at=issued.expires_at,
+            user_id=issued.user_id,
+            tenant_id=issued.tenant_id,
+        )
+
     return app
+
+
+class _LoginBody(BaseModel):
+    email: str
+    password: str
+
+
+class _LoginResponse(BaseModel):
+    credential: str
+    expires_at: datetime
+    user_id: int
+    tenant_id: int
+
+
+def _perform_login(app: FastAPI, email: str, password: str) -> ControlCredential:
+    settings = app.state.settings
+    moment = app.state.now()
+    accounts = app.state.login_accounts
+    if accounts is None:
+        if app.state.engine is None:
+            raise LoginUnavailable("login is unavailable")
+        with app.state.engine.connect() as connection:
+            return authenticate(
+                DatabaseLoginAccounts(connection),
+                email,
+                password,
+                secret=settings.control_secret,
+                now=moment,
+                ttl_seconds=settings.control_credential_ttl_seconds,
+            )
+    return authenticate(
+        accounts,
+        email,
+        password,
+        secret=settings.control_secret,
+        now=moment,
+        ttl_seconds=settings.control_credential_ttl_seconds,
+    )
 
 
 def main() -> None:

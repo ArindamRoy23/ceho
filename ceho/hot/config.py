@@ -64,6 +64,19 @@ def _region_value(environment: Mapping[str, str]) -> str:
     return value
 
 
+def _control_ttl(environment: Mapping[str, str]) -> int:
+    raw = environment.get("CEHO_CONTROL_CREDENTIAL_TTL_SECONDS", "900").strip()
+    try:
+        ttl = int(raw)
+    except ValueError as error:
+        raise ConfigurationError(
+            "CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be an integer"
+        ) from error
+    if ttl < 1:
+        raise ConfigurationError("CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be at least 1")
+    return ttl
+
+
 def _port_value(environment: Mapping[str, str]) -> int:
     value = environment.get("CEHO_PORT", "8000")
     try:
@@ -125,9 +138,11 @@ class HotServerSettings:
     s3_secret_access_key: str
     s3_region: str
     signaling_secret: str
+    control_secret: str
     event_publisher_url: str
     host: str
     port: int
+    control_credential_ttl_seconds: int = 900
     deepgram_api_key: str | None = None
 
     @property
@@ -156,7 +171,9 @@ class HotServerSettings:
             s3_secret_access_key=_required_value("CEHO_S3_SECRET_ACCESS_KEY", source),
             s3_region=_region_value(source),
             signaling_secret=_required_value("CEHO_SIGNALING_SECRET", source),
+            control_secret=_required_value("CEHO_CONTROL_SECRET", source),
             event_publisher_url=_url_value("CEHO_EVENT_PUBLISHER_URL", source),
+            control_credential_ttl_seconds=_control_ttl(source),
             host=source.get("CEHO_HOST", "127.0.0.1"),
             port=_port_value(source),
             deepgram_api_key=_optional_value("DEEPGRAM_API_KEY", source),

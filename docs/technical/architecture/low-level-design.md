@@ -115,6 +115,7 @@ ceho/
 ├── hot/
 │   ├── __init__.py
 │   ├── server.py       # HTTP API, authorization, lifecycle, signaling
+│   ├── auth.py         # password login and control credentials
 │   ├── session.py      # session/membership persistence and finalization
 │   ├── pipeline.py     # Pipecat construction and pipeline-run lifecycle
 │   ├── transport.py    # transport port and media contracts
@@ -141,6 +142,16 @@ When hot servers scale horizontally, this becomes a per-session ownership guaran
 The authenticated control request determines the tenant. The server never accepts a tenant, user, speaker, or authorization claim from an audio packet.
 
 Every session lookup, membership lookup, media record, transcript write, and outbox event is constrained by the authenticated tenant and session. Composite foreign keys in `ceho_core` prevent child rows from referencing a parent in another tenant.
+
+### Password login
+
+`POST /login` accepts an email and a password. The email is trimmed and lowercased before it is compared with `users.email`. The request does not choose a tenant. The control credential names the user and tenant from the one matching account.
+
+A wrong password, an unknown email, a blank email or password, an account whose `password_hash` is null, and more than one account whose password verifies are the same rejection: HTTP 401 `login rejected`. The response does not include the password or the hash. When several accounts share the normalized email and exactly one password verifies, that account is the caller. Two verifies is a rejection, because the tenant would otherwise be a guess.
+
+The credential is HMAC-SHA256 over a JSON body `user_id`, `tenant_id`, `exp`, and `use` = `control`. It is signed with `CEHO_CONTROL_SECRET`. `CEHO_SIGNALING_SECRET` stays signaling-only and does not verify this credential. `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS` defaults to 900. A credential is expired when the current time is at or past `exp`, and an expired or altered credential is rejected. The password, the hash, and the credential are not log fields.
+
+OAuth login is unchanged. `external_ids` is not read by this route.
 
 ### Create session
 
@@ -516,7 +527,7 @@ Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only lo
 
 `ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
 
-`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, and a critical line when startup configuration or the listen socket fails. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` and `webrtc.py` have no lifecycle yet, so they do not log.
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, a critical line when startup configuration or the listen socket fails, and a login that could not reach the account directory. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, and a rejected turn. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` and `webrtc.py` have no lifecycle yet, so they do not log.
 
 Minimum metrics:
 
@@ -568,7 +579,11 @@ settings. `CEHO_LOG_LEVEL` (default `INFO`) selects which log calls are emitted.
 Startup validates `DATABASE_URL`,
 `CEHO_MEDIA_STORAGE_URI` (`s3://` bucket), `CEHO_S3_ACCESS_KEY_ID`,
 `CEHO_S3_SECRET_ACCESS_KEY`, `CEHO_S3_REGION` (default `us-east-1`),
-`CEHO_SIGNALING_SECRET`, and `CEHO_EVENT_PUBLISHER_URL`.
+`CEHO_SIGNALING_SECRET`, `CEHO_CONTROL_SECRET`, and `CEHO_EVENT_PUBLISHER_URL`.
+`CEHO_CONTROL_CREDENTIAL_TTL_SECONDS` defaults to 900. A missing control secret
+fails startup with `CEHO_CONTROL_SECRET must be configured`. A non-integer ttl
+fails with `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be an integer`, and a ttl
+below 1 fails with `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be at least 1`.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
 present and used only to construct the direct-source Deepgram STT processor.
@@ -582,7 +597,7 @@ later hot-path modules is under [Target package structure](#target-package-struc
 
 ## Implementation sequence
 
-1. Define the control API and authentication/join-credential contract.
+1. Define the control API and authentication/join-credential contract. Password login is done: `POST /login` returns a control credential signed with `CEHO_CONTROL_SECRET`. Session create, join, reconnect, end, and the signaling join credential are not routes yet.
 2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
 3. Implement the transport port and WebRTC adapter.
 4. Implement session creation, joining, reconnect, explicit end, and idle termination.
