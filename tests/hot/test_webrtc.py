@@ -20,7 +20,7 @@ from ceho.hot.transport import (
     SourceRemoved,
     TransportError,
 )
-from ceho.hot.webrtc import DirectSourceWebRTC, SmallWebRTCPeer, WebRTCPeer
+from ceho.hot.webrtc import DirectSourceWebRTC, SmallWebRTCPeer, WebRTCPeer, ice_servers_for
 
 OFFER = "\r\n".join(
     [
@@ -731,6 +731,26 @@ async def test_media_failure_is_logged_with_the_exception(caplog: pytest.LogCapt
     assert records
     assert records[0].exc_info is not None
     assert records[0].ceho_fields["peer_id"] == "peer-1"  # type: ignore[attr-defined]
+
+
+async def test_small_webrtc_peer_gathers_with_stun_and_turn() -> None:
+    from ceho.hot.turn import IceRelay
+
+    relay = IceRelay(
+        stun_url="stun:stun.cloudflare.com:3478",
+        turn_url="turns:turn.cloudflare.com:443?transport=tcp",
+        username="turn-user",
+        password="turn-secret",
+    )
+    peer = SmallWebRTCPeer(ice_servers=ice_servers_for(relay))
+    try:
+        servers = peer.ice_servers
+        assert servers[0].urls == relay.stun_url
+        assert servers[1].urls == relay.turn_url
+        assert servers[1].username == relay.username
+        assert servers[1].credential == relay.password
+    finally:
+        await peer.close()
 
 
 async def test_small_webrtc_loopback_delivers_pcm_from_one_microphone() -> None:

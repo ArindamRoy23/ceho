@@ -117,6 +117,7 @@ ceho/
 │   ├── server.py       # HTTP API, authorization, lifecycle, signaling
 │   ├── auth.py         # password login and control credentials
 │   ├── signaling.py    # signaling credentials
+│   ├── turn.py         # short-lived Cloudflare TURN credentials
 │   ├── session.py      # session persistence, lifecycle, and finalization
 │   ├── pipeline.py     # Pipecat construction and pipeline-run lifecycle
 │   ├── transport.py    # transport port and media contracts
@@ -179,11 +180,16 @@ The control request, not media traffic, creates the durable session row. A faile
 2. Reject the request when the session is missing or ended. A missing session, including one that belongs to another tenant, is HTTP 404. An ended session is HTTP 409.
 3. Leave speaker rows untouched. Joining does not create a session speaker or a new session.
 4. Issue a new signaling credential containing the allowed session, tenant, channel, and expiry.
-5. Perform WebRTC signaling with that credential.
-6. Bind the authenticated peer established by signaling to the session.
-7. Start a pipeline run for every input audio source announced by that peer.
+5. Mint a short-lived Cloudflare TURN username and password and return them with the configured STUN and TURN URLs.
+6. Perform WebRTC signaling with that credential.
+7. Bind the authenticated peer established by signaling to the session.
+8. Start a pipeline run for every input audio source announced by that peer.
 
-Steps 5 through 7 belong to the transport adapter. The control API stops at the signaling credential.
+Create returns the same ICE fields as join. The URLs are `CEHO_STUN_URL` (default `stun:stun.cloudflare.com:3478`) and `CEHO_TURN_URL` (default `turns:turn.cloudflare.com:443?transport=tcp`). The username and password come from Cloudflare Realtime TURN, `POST https://rtc.live.cloudflare.com/v1/turn/keys/{CEHO_TURN_KEY_ID}/credentials/generate`, authorized with `CEHO_TURN_API_TOKEN`. The lifetime is `CEHO_TURN_TTL_SECONDS` and defaults to 60. Each create and each join mints a new pair. The password is not the CEHO password, and it is not a log field.
+
+`POST /sessions/{session_id}/offer` is the one signaling call. The body is `{ "sdp": "<offer>" }`. The `Authorization: Bearer` header carries the signaling credential, not the control credential. The route verifies that credential, rejects an expired credential and a credential for another session, and loads the session in the credential's tenant. A missing session, including one that belongs to another tenant, is HTTP 404. An ended session is HTTP 409. It builds an `AuthorizedSessionBinding` and calls `DirectSourceWebRTC.accept_offer`. `server.py` does not parse SDP. A second m-line or a non-sending direction is the adapter's rejection, HTTP 400, and the peer is closed. One valid offer returns `{ "sdp": "<answer>", "type": "answer" }` and keeps that peer. The source id is `{peer_id}/microphone`. A later offer for the same session closes the previous peer. The offer mints a second short-lived pair and passes those STUN and TURN servers into `SmallWebRTCConnection`, so the gathered answer can contain a server-reflexive address or a relay candidate. Media after the answer is ICE, DTLS, and SRTP. The pipeline is not attached yet.
+
+The process must be reachable at its HTTPS origin from the browser that loaded the page.
 
 The signaling credential authorizes signaling only. It is not a durable authorization grant or a control credential. Presented on create, join, or end, it is rejected.
 
@@ -202,7 +208,7 @@ Ending a session sets `status = ended` and `ended_at`, and inserts one `session.
 
 ## Transport port
 
-`transport.py` defines the contracts `server.py` and `pipeline.py` use. `webrtc.py` is the first adapter. The pipeline depends on `DirectSourceTransport` (`events` and `close`) and does not import `webrtc`. The ASGI app does not mount signaling yet. The server passes an `AuthorizedSessionBinding` it has already authorized.
+`transport.py` defines the contracts `server.py` and `pipeline.py` use. `webrtc.py` is the first adapter. The pipeline depends on `DirectSourceTransport` (`events` and `close`) and does not import `webrtc`. The offer route passes an `AuthorizedSessionBinding` it has already authorized.
 
 The binding carries `tenant_id`, `session_id`, `peer_id`, and a timezone-aware `expires_at`. `accept_offer` refuses signaling when the current time is at or past that expiry. The adapter does not look up the session and does not verify the join credential.
 
@@ -212,7 +218,7 @@ The binding carries `tenant_id`, `session_id`, `peer_id`, and a timezone-aware `
 
 `SourceAdded` reports the rtpmap codec, clock rate, and channel count. A browser microphone offer commonly declares `opus/48000/2`.
 
-`SmallWebRTCPeer` delegates the peer connection to Pipecat `SmallWebRTCConnection`. That connection answers the offer, gathers ICE, and terminates DTLS. The adapter reads the connection's one audio track and yields decoded `pcm_s16le`. The frame timestamp is that decoded frame's presentation time. aiortc subtracts the first RTP timestamp, so this clock starts at zero and a later RTP gap stays a gap. The adapter does not apply a second rewrite. This adapter does not send audio. A transceiver list other than one audio track is rejected.
+`SmallWebRTCPeer` delegates the peer connection to Pipecat `SmallWebRTCConnection` and passes the minted STUN and TURN servers into it. Without those servers the connection gathers only a private host candidate. aiortc finishes gathering inside `setLocalDescription`, so the answer SDP includes the server-reflexive or relay candidates that gathering produced. The connection answers the offer, gathers ICE, and terminates DTLS. The adapter reads the connection's one audio track and yields decoded `pcm_s16le`. The frame timestamp is that decoded frame's presentation time. aiortc subtracts the first RTP timestamp, so this clock starts at zero and a later RTP gap stays a gap. The adapter does not apply a second rewrite. This adapter does not send audio. A transceiver list other than one audio track is rejected.
 
 ### Frame and clock rules
 
@@ -542,7 +548,7 @@ Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only lo
 
 `ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
 
-`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, each idle sweep, a sweep failure that will be retried, a critical line when startup configuration or the listen socket fails, a login that could not reach the account directory, and a session request that failed outside the control rules. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `signaling.py` logs a rejected signaling credential and does not log the credential. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, a rejected turn, a session create, join, and end, a rejected control request, a commit failure, an idle end that lost a race, and a session event that stayed pending. It does not log credentials. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` defines contracts and does not log. `webrtc.py` logs peer connected, source added, each delivered frame, queue pressure, a rejected frame, source removed, and peer closed. A rejected offer is an error. A media failure is an error, with the traceback when an exception was caught. SDP and PCM are not fields. The adapter cannot exit the process, so it does not log critical.
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, each idle sweep, a sweep failure that will be retried, a critical line when startup configuration or the listen socket fails, a login that could not reach the account directory, a session request that failed outside the control rules, an accepted offer, and a signaling request rejected because the session is missing or ended. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `signaling.py` logs a rejected signaling credential and does not log the credential. `turn.py` logs a credential request, a minted credential, and a rejected or failed mint. It does not log the API token, the TURN username, or the TURN password. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, a rejected turn, a session create, join, and end, a rejected control request, a commit failure, an idle end that lost a race, and a session event that stayed pending. It does not log credentials. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` defines contracts and does not log. `webrtc.py` logs peer connected, source added, each delivered frame, queue pressure, a rejected frame, source removed, and peer closed. A rejected offer is an error. A media failure is an error, with the traceback when an exception was caught. SDP and PCM are not fields. The adapter cannot exit the process, so it does not log critical.
 
 Minimum metrics:
 
@@ -590,7 +596,8 @@ environment. Variables already set in the process stay in place.
 
 The process listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`)
 and exposes `GET /health`, `POST /login`, `POST /sessions`,
-`POST /sessions/{session_id}/join`, and `POST /sessions/{session_id}/end`.
+`POST /sessions/{session_id}/join`, `POST /sessions/{session_id}/end`, and
+`POST /sessions/{session_id}/offer`.
 `main` calls `ceho.logging.configure` before reading
 settings. `CEHO_LOG_LEVEL` (default `INFO`) selects which log calls are emitted.
 Startup validates `DATABASE_URL`,
@@ -605,6 +612,12 @@ below 1 fails with `CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be at least 1`.
 `CEHO_SESSION_IDLE_TIMEOUT_SECONDS` defaults to 900. A non-integer value fails
 with that setting's name and `must be an integer`. A value below 1 fails with
 that setting's name and `must be at least 1`.
+`CEHO_STUN_URL` defaults to `stun:stun.cloudflare.com:3478`.
+`CEHO_TURN_URL` defaults to `turns:turn.cloudflare.com:443?transport=tcp`.
+Either value must be an absolute URI with a `stun`/`stuns` or `turn`/`turns`
+scheme. `CEHO_TURN_KEY_ID` and `CEHO_TURN_API_TOKEN` are required. A missing
+value fails startup with that setting's name and `must be configured`.
+`CEHO_TURN_TTL_SECONDS` defaults to 60 and uses the same integer checks.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when
 present and used only to construct the direct-source Deepgram STT processor.
@@ -621,7 +634,7 @@ later hot-path modules is under [Target package structure](#target-package-struc
 
 1. ~~Define the control API and authentication/join-credential contract.~~ Done: password login, and create, join, reconnect, and end. The signaling credential is HMAC-SHA256 signed with `CEHO_SIGNALING_SECRET`. WebRTC binding remains step 3.
 2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
-3. ~~Implement the transport port and WebRTC adapter.~~ Done for one direct microphone: the port, bounded queue, and Pipecat Small WebRTC peer. Signaling is not mounted on the ASGI app, and the pipeline is not attached yet.
+3. ~~Implement the transport port and WebRTC adapter.~~ Done for one direct microphone: the port, bounded queue, and Pipecat Small WebRTC peer. The offer route is mounted. The pipeline is not attached yet.
 4. ~~Implement session creation, joining, reconnect, explicit end, and idle termination.~~ Done in the control API. Stopping pipelines on end waits for the transport adapter.
 5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The server does not attach the recorder until a direct source is connected.
 6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.

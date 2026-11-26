@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import Any, NoReturn, Protocol
 
+from aiortc.rtcconfiguration import RTCIceServer
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 
 from ceho.hot.config import TransportQueueConfig
@@ -36,6 +37,7 @@ from ceho.hot.transport import (
     TransportEvent,
     direct_source_id,
 )
+from ceho.hot.turn import IceRelay
 from ceho.logging import get_logger
 
 logger = get_logger(__name__)
@@ -119,6 +121,11 @@ class DirectSourceWebRTC:
     def state(self) -> PeerState | None:
         """``None`` until signaling has connected the peer."""
         return self._state
+
+    @property
+    def source_id(self) -> str:
+        """The one microphone this peer accepts, ``{peer_id}/microphone``."""
+        return self._source_id
 
     async def accept_offer(self, sdp: str) -> str:
         """Complete signaling for one sending microphone and start reading it."""
@@ -487,13 +494,25 @@ class SmallWebRTCPeer:
     This class reads that track into CEHO frames. It does not send audio.
     """
 
-    def __init__(self, connection: SmallWebRTCConnection | None = None) -> None:
-        self._connection = connection or SmallWebRTCConnection()
+    def __init__(
+        self,
+        connection: SmallWebRTCConnection | None = None,
+        *,
+        ice_servers: list[RTCIceServer] | None = None,
+    ) -> None:
+        if connection is None:
+            connection = SmallWebRTCConnection(ice_servers=ice_servers)
+        self._connection = connection
         self._local_close = False
         self._failure: CloseReason | None = None
         self._detail = "media failed"
         self._connection.add_event_handler("failed", self._on_failed)
         self._connection.add_event_handler("closed", self._on_closed)
+
+    @property
+    def ice_servers(self) -> list[RTCIceServer]:
+        """STUN and TURN servers this peer gathers against."""
+        return list(self._connection.ice_servers)
 
     async def negotiate(self, offer_sdp: str) -> str:
         await self._connection.initialize(sdp=offer_sdp, type="offer")
@@ -546,6 +565,19 @@ class SmallWebRTCPeer:
             if frame is None:
                 continue
             yield _pcm_frame(frame)
+
+
+def ice_servers_for(relay: IceRelay) -> list[RTCIceServer]:
+    """STUN and TURN servers for one minted relay.
+
+    The TURN entry carries the short-lived username and password. The answer
+    gathers against these servers, so it can include a server-reflexive address
+    or a relay candidate.
+    """
+    return [
+        RTCIceServer(urls=relay.stun_url),
+        RTCIceServer(urls=relay.turn_url, username=relay.username, credential=relay.password),
+    ]
 
 
 def _pcm_frame(frame: Any) -> InboundAudio:

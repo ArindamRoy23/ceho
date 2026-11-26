@@ -26,6 +26,8 @@ def _environment(**overrides: str) -> dict[str, str]:
         "CEHO_SIGNALING_SECRET": "test-secret",
         "CEHO_CONTROL_SECRET": "control-secret",
         "CEHO_EVENT_PUBLISHER_URL": "pgmq://ceho",
+        "CEHO_TURN_KEY_ID": "turn-key",
+        "CEHO_TURN_API_TOKEN": "turn-token",
     }
     values.update(overrides)
     return values
@@ -206,3 +208,49 @@ def test_signaling_ttl_and_idle_timeout_are_read() -> None:
 def test_session_duration_settings_fail_clearly(name: str, value: str) -> None:
     with pytest.raises(ConfigurationError, match=name):
         HotServerSettings.from_environment(_environment(**{name: value}))
+
+
+def test_cloudflare_ice_urls_default_and_turn_ttl_defaults_to_one_minute() -> None:
+    settings = HotServerSettings.from_environment(
+        _environment(CEHO_TURN_KEY_ID="key-1", CEHO_TURN_API_TOKEN="token-1")
+    )
+
+    assert settings.stun_url == "stun:stun.cloudflare.com:3478"
+    assert settings.turn_url == "turns:turn.cloudflare.com:443?transport=tcp"
+    assert settings.turn_key_id == "key-1"
+    assert settings.turn_api_token == "token-1"
+    assert settings.turn_ttl_seconds == 60
+
+
+def test_ice_urls_and_turn_ttl_are_read_from_the_environment() -> None:
+    settings = HotServerSettings.from_environment(
+        _environment(
+            CEHO_STUN_URL="stun:stun.example:3478",
+            CEHO_TURN_URL="turn:turn.example:3478?transport=udp",
+            CEHO_TURN_KEY_ID="key-2",
+            CEHO_TURN_API_TOKEN="token-2",
+            CEHO_TURN_TTL_SECONDS="120",
+        )
+    )
+
+    assert settings.stun_url == "stun:stun.example:3478"
+    assert settings.turn_url == "turn:turn.example:3478?transport=udp"
+    assert settings.turn_ttl_seconds == 120
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CEHO_TURN_KEY_ID", ""),
+        ("CEHO_TURN_API_TOKEN", "  "),
+        ("CEHO_STUN_URL", "https://stun.cloudflare.com"),
+        ("CEHO_TURN_URL", "stun:turn.cloudflare.com:3478"),
+        ("CEHO_TURN_TTL_SECONDS", "0"),
+        ("CEHO_TURN_TTL_SECONDS", "soon"),
+    ],
+)
+def test_turn_settings_fail_clearly(name: str, value: str) -> None:
+    environment = _environment()
+    environment[name] = value
+    with pytest.raises(ConfigurationError, match=name):
+        HotServerSettings.from_environment(environment)
