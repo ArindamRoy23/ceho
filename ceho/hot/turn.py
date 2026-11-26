@@ -51,6 +51,18 @@ class IceRelay:
     password: str
 
 
+class StunOnlyTurn:
+    """STUN without a TURN relay, used when Cloudflare credentials are unset."""
+
+    def __init__(self, stun_url: str) -> None:
+        self._stun_url = stun_url
+
+    def mint(self, *, ttl_seconds: int) -> IceRelay:
+        """Return the configured STUN URL and no TURN username or password."""
+        del ttl_seconds
+        return IceRelay(stun_url=self._stun_url, turn_url="", username="", password="")
+
+
 class CloudflareTurn:
     """Mint a username and password from Cloudflare Realtime TURN."""
 

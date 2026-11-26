@@ -185,7 +185,7 @@ The control request, not media traffic, creates the durable session row. A faile
 7. Bind the authenticated peer established by signaling to the session.
 8. Start a pipeline run for every input audio source announced by that peer.
 
-Create returns the same ICE fields as join. The URLs are `CEHO_STUN_URL` (default `stun:stun.cloudflare.com:3478`) and `CEHO_TURN_URL` (default `turns:turn.cloudflare.com:443?transport=tcp`). The username and password come from Cloudflare Realtime TURN, `POST https://rtc.live.cloudflare.com/v1/turn/keys/{CEHO_TURN_KEY_ID}/credentials/generate`, authorized with `CEHO_TURN_API_TOKEN`. The lifetime is `CEHO_TURN_TTL_SECONDS` and defaults to 60. Each create and each join mints a new pair. The password is not the CEHO password, and it is not a log field.
+Create returns the same ICE fields as join. The URLs are `CEHO_STUN_URL` (default `stun:stun.cloudflare.com:3478`) and `CEHO_TURN_URL` (default `turns:turn.cloudflare.com:443?transport=tcp`). When `CEHO_TURN_KEY_ID` and `CEHO_TURN_API_TOKEN` are both set, the username and password come from Cloudflare Realtime TURN, `POST https://rtc.live.cloudflare.com/v1/turn/keys/{CEHO_TURN_KEY_ID}/credentials/generate`, authorized with `CEHO_TURN_API_TOKEN`. The lifetime is `CEHO_TURN_TTL_SECONDS` and defaults to 60. Each create and each join mints a new pair. The password is not the CEHO password, and it is not a log field. When both settings are unset, create and join still succeed: `turn_url`, `turn_username`, and `turn_password` are empty, and the browser and the answer gather with STUN only. Setting one of the two without the other fails startup.
 
 `POST /sessions/{session_id}/offer` is the one signaling call. The body is `{ "sdp": "<offer>" }`. The `Authorization: Bearer` header carries the signaling credential, not the control credential. The route verifies that credential, rejects an expired credential and a credential for another session, and loads the session in the credential's tenant. A missing session, including one that belongs to another tenant, is HTTP 404. An ended session is HTTP 409. It builds an `AuthorizedSessionBinding` and calls `DirectSourceWebRTC.accept_offer`. `server.py` does not parse SDP. A second m-line or a non-sending direction is the adapter's rejection, HTTP 400, and the peer is closed. One valid offer returns `{ "sdp": "<answer>", "type": "answer" }` and keeps that peer. The source id is `{peer_id}/microphone`. A later offer for the same session closes the previous peer. The offer mints a second short-lived pair and passes those STUN and TURN servers into `SmallWebRTCConnection`, so the gathered answer can contain a server-reflexive address or a relay candidate. Media after the answer is ICE, DTLS, and SRTP. The pipeline is not attached yet.
 
@@ -615,8 +615,10 @@ that setting's name and `must be at least 1`.
 `CEHO_STUN_URL` defaults to `stun:stun.cloudflare.com:3478`.
 `CEHO_TURN_URL` defaults to `turns:turn.cloudflare.com:443?transport=tcp`.
 Either value must be an absolute URI with a `stun`/`stuns` or `turn`/`turns`
-scheme. `CEHO_TURN_KEY_ID` and `CEHO_TURN_API_TOKEN` are required. A missing
-value fails startup with that setting's name and `must be configured`.
+scheme. `CEHO_TURN_KEY_ID` and `CEHO_TURN_API_TOKEN` are optional and must be
+set together. When both are unset the process starts without TURN and logs
+`turn not configured`. Setting one without the other fails startup with the
+missing setting's name and `must be configured`.
 `CEHO_TURN_TTL_SECONDS` defaults to 60 and uses the same integer checks.
 `CEHO_S3_ENDPOINT_URL` is optional and selects path-style addressing for MinIO.
 `DEEPGRAM_API_KEY` is optional and is not required to start. It is read when

@@ -134,6 +134,17 @@ def _fields(record: object) -> dict[str, object]:
     return fields
 
 
+def test_unconfigured_turn_serves_stun_without_calling_cloudflare() -> None:
+    app = create_app(_settings())
+
+    relay = app.state.turn.mint(ttl_seconds=60)
+
+    assert relay.stun_url == "stun:stun.cloudflare.com:3478"
+    assert relay.turn_url == ""
+    assert relay.username == ""
+    assert relay.password == ""
+
+
 def test_lifespan_logs_start_and_stop(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level("INFO", logger="ceho.hot.server")
 
@@ -142,9 +153,14 @@ def test_lifespan_logs_start_and_stop(caplog: pytest.LogCaptureFixture) -> None:
 
     assert response.status_code == 200
     records = [record for record in caplog.records if record.name == "ceho.hot.server"]
-    assert [record.msg for record in records] == ["hot server started", "hot server stopped"]
-    assert _fields(records[0]) == {"host": "127.0.0.1", "port": 8000}
+    assert [record.msg for record in records] == [
+        "turn not configured",
+        "hot server started",
+        "hot server stopped",
+    ]
+    assert _fields(records[0]) == {"stun_url": "stun:stun.cloudflare.com:3478"}
     assert _fields(records[1]) == {"host": "127.0.0.1", "port": 8000}
+    assert _fields(records[2]) == {"host": "127.0.0.1", "port": 8000}
 
 
 def test_outbox_drain_failure_is_retried(caplog: pytest.LogCaptureFixture) -> None:
