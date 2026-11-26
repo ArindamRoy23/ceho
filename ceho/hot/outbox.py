@@ -20,6 +20,8 @@ from ceho.models import Base, OutboxEvent
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
+SESSION_CREATED = "session.created"
+SESSION_ENDED = "session.ended"
 TRANSCRIPT_CREATED = "transcript.created"
 OUTBOX_POLL_INTERVAL_SECONDS = 1.0
 

@@ -52,6 +52,6 @@ Modules take a `HotServerSettings` value from that read.
 The server listens on `CEHO_HOST` and `CEHO_PORT` (default `127.0.0.1:8000`
 when unset) and exposes `GET /health`. It validates `DATABASE_URL`,
 `CEHO_MEDIA_STORAGE_URI`, `CEHO_SIGNALING_SECRET`, and
-`CEHO_EVENT_PUBLISHER_URL` before startup. The sample media URI and in-memory
-publisher are development-only placeholders; this foundation does not record
-audio or publish events yet.
+`CEHO_EVENT_PUBLISHER_URL` before startup. The sample media URI is a
+development placeholder. `pgmq://ceho` sends outbox envelopes through the
+pgmq extension. This foundation does not record audio yet.

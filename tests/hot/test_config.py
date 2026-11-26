@@ -4,6 +4,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from ceho.hot.config import (
     DIRECT_SOURCE_PIPELINE,
     ConfigurationError,
@@ -22,6 +24,7 @@ def _environment(**overrides: str) -> dict[str, str]:
         "CEHO_S3_SECRET_ACCESS_KEY": "ceho-dev-only",
         "CEHO_S3_REGION": "us-east-1",
         "CEHO_SIGNALING_SECRET": "test-secret",
+        "CEHO_CONTROL_SECRET": "control-secret",
         "CEHO_EVENT_PUBLISHER_URL": "pgmq://ceho",
     }
     values.update(overrides)
@@ -30,6 +33,36 @@ def _environment(**overrides: str) -> dict[str, str]:
 
 class HotServerSettingsTest(unittest.TestCase):
     """Verify required hot-server startup settings."""
+
+    def test_missing_control_secret_fails_clearly(self) -> None:
+        environment = _environment()
+        del environment["CEHO_CONTROL_SECRET"]
+
+        with self.assertRaisesRegex(ConfigurationError, "CEHO_CONTROL_SECRET must be configured"):
+            HotServerSettings.from_environment(environment)
+
+    def test_control_credential_ttl_defaults_to_fifteen_minutes(self) -> None:
+        settings = HotServerSettings.from_environment(_environment())
+
+        self.assertEqual(settings.control_credential_ttl_seconds, 900)
+
+    def test_control_credential_ttl_must_be_an_integer(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be an integer",
+        ):
+            HotServerSettings.from_environment(
+                _environment(CEHO_CONTROL_CREDENTIAL_TTL_SECONDS="soon")
+            )
+
+    def test_control_credential_ttl_must_be_at_least_one_second(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "CEHO_CONTROL_CREDENTIAL_TTL_SECONDS must be at least 1",
+        ):
+            HotServerSettings.from_environment(
+                _environment(CEHO_CONTROL_CREDENTIAL_TTL_SECONDS="0")
+            )
 
     def test_missing_required_setting_fails_clearly(self) -> None:
         environment = _environment()
@@ -139,3 +172,37 @@ class HotServerSettingsTest(unittest.TestCase):
 
         load_dotenv.assert_called_once_with()
         self.assertEqual(settings.signaling_secret, "from-dotenv")
+
+
+def test_signaling_ttl_and_idle_timeout_default() -> None:
+    settings = HotServerSettings.from_environment(_environment())
+
+    assert settings.signaling_credential_ttl_seconds == 60
+    assert settings.session_idle_timeout_seconds == 900
+
+
+def test_signaling_ttl_and_idle_timeout_are_read() -> None:
+    settings = HotServerSettings.from_environment(
+        _environment(
+            CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS="15",
+            CEHO_SESSION_IDLE_TIMEOUT_SECONDS="120",
+        )
+    )
+
+    assert settings.signaling_credential_ttl_seconds == 15
+    assert settings.session_idle_timeout_seconds == 120
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS", "0"),
+        ("CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS", "nope"),
+        ("CEHO_SIGNALING_CREDENTIAL_TTL_SECONDS", ""),
+        ("CEHO_SESSION_IDLE_TIMEOUT_SECONDS", "-1"),
+        ("CEHO_SESSION_IDLE_TIMEOUT_SECONDS", "  "),
+    ],
+)
+def test_session_duration_settings_fail_clearly(name: str, value: str) -> None:
+    with pytest.raises(ConfigurationError, match=name):
+        HotServerSettings.from_environment(_environment(**{name: value}))
