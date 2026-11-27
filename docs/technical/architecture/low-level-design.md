@@ -339,6 +339,8 @@ Not implemented yet: mapping status and source identity on `session_speakers`.
 
 ### Channels
 
+The generic catalog is tenant 1. Upgrade inserts `channel_name` `WebRTC` there when that name is missing. A new database has no channels, so the identity assigns `channel_id` 1. The revision does not delete other channels. A later surface is another catalog row.
+
 `channel_name` is required and unique per tenant. A tenant channel cannot reuse a name from the generic catalog (tenant 1), and the catalog cannot take a name a tenant already uses. `channels_reject_generic_name_shadow` checks both directions and takes a transaction advisory lock on the name, so two concurrent inserts cannot both pass.
 
 ### Users
