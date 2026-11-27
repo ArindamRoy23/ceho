@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Request
+from pipecat.processors.frame_processor import FrameProcessor
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.engine import Engine
 
@@ -26,6 +27,19 @@ from ceho.hot.auth import (
     read_control_credential,
 )
 from ceho.hot.config import ConfigurationError, HotServerSettings, turn_credential_pair
+from ceho.hot.media import (
+    DatabaseMediaCatalog,
+    DirectSourceRecording,
+    MediaProvenance,
+    s3_object_storage,
+)
+from ceho.hot.microphone import (
+    MicrophoneRecorder,
+    TranscriptCommit,
+    attach_microphone,
+    direct_source_processors,
+    recording_source_id,
+)
 from ceho.hot.outbox import (
     OUTBOX_POLL_INTERVAL_SECONDS,
     DatabaseOutboxStore,
@@ -33,9 +47,11 @@ from ceho.hot.outbox import (
     publish_pending,
     publisher_from_url,
 )
+from ceho.hot.pipeline import TranscriptCandidate
 from ceho.hot.session import (
     ControlError,
     ControlStore,
+    FinalizeTranscript,
     IssuedSession,
     PresenceBook,
     SessionView,
@@ -44,6 +60,7 @@ from ceho.hot.session import (
     create_session,
     end_idle_sessions,
     end_session,
+    finalize_transcript,
     join_session,
 )
 from ceho.hot.signaling import (
@@ -143,6 +160,10 @@ def create_app(
     app.state.peers = {}
     app.state.next_peer = 1
     app.state.peer_lock = asyncio.Lock()
+    app.state.object_storage = None
+    app.state.recorder_factory = None
+    app.state.transcript_commit = None
+    app.state.microphone_processors = None
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -242,7 +263,13 @@ def create_app(
             session_id=session_id,
         )
         relay = await _mint(request.app)
-        answer = await _accept_offer(request.app, grant, relay, body.sdp)
+        answer = await _accept_offer(
+            request.app,
+            grant,
+            relay,
+            body.sdp,
+            session.started_at,
+        )
         return _Answer(sdp=answer, type="answer")
 
     return app
@@ -411,6 +438,7 @@ class _LivePeer:
     generation: int
     tenant_id: int
     session_id: int
+    started_at: datetime
     watch: asyncio.Task[None] | None = None
 
 
@@ -466,7 +494,13 @@ async def _mint(app: FastAPI) -> IceRelay:
         raise HTTPException(status_code=503, detail="turn is unavailable") from None
 
 
-async def _accept_offer(app: FastAPI, grant: SignalingGrant, relay: IceRelay, sdp: str) -> str:
+async def _accept_offer(
+    app: FastAPI,
+    grant: SignalingGrant,
+    relay: IceRelay,
+    sdp: str,
+    started_at: datetime,
+) -> str:
     key = (grant.tenant_id, grant.session_id)
     previous = app.state.peers.get(key)
     if previous is not None:
@@ -496,11 +530,12 @@ async def _accept_offer(app: FastAPI, grant: SignalingGrant, relay: IceRelay, sd
         generation=generation,
         tenant_id=grant.tenant_id,
         session_id=grant.session_id,
+        started_at=started_at,
     )
     app.state.peers[key] = live
     app.state.presence.attach(grant.tenant_id, grant.session_id)
     live.watch = asyncio.create_task(
-        _watch_peer(app, key, generation, adapter),
+        _watch_peer(app, key, generation, adapter, started_at),
         name=f"peer-{peer_id}",
     )
     logger.info(
@@ -518,9 +553,138 @@ async def _watch_peer(
     key: tuple[int, int],
     generation: int,
     adapter: DirectSourceWebRTC,
+    started_at: datetime,
 ) -> None:
-    await adapter.wait_closed()
-    await _release_peer(app, key, generation)
+    try:
+        await _serve_microphone(
+            app,
+            adapter,
+            tenant_id=key[0],
+            session_id=key[1],
+            started_at=started_at,
+        )
+    except Exception:
+        logger.exception(
+            "microphone failed",
+            tenant_id=key[0],
+            session_id=key[1],
+            source_id=adapter.source_id,
+        )
+        await adapter.close()
+    finally:
+        await _release_peer(app, key, generation)
+
+
+async def _serve_microphone(
+    app: FastAPI,
+    adapter: DirectSourceWebRTC,
+    *,
+    tenant_id: int,
+    session_id: int,
+    started_at: datetime,
+) -> None:
+    """Record and transcribe the peer's microphone until it closes.
+
+    With no database and no injected recorder, events are drained so the
+    peer can finish. That path does not open storage or a pipeline run.
+    """
+    recorder = _microphone_recorder(
+        app,
+        tenant_id=tenant_id,
+        session_id=session_id,
+        source_id=adapter.source_id,
+        started_at=started_at,
+    )
+    processors = _microphone_processors(app)
+    if recorder is None and not processors:
+        async for _event in adapter.events():
+            pass
+        return
+    if recorder is None:
+        logger.error(
+            "microphone recording failed",
+            tenant_id=tenant_id,
+            session_id=session_id,
+            source_id=adapter.source_id,
+            error="recording is unavailable",
+        )
+        async for _event in adapter.events():
+            pass
+        return
+    await attach_microphone(
+        adapter,
+        processors=processors,
+        recorder=recorder,
+        commit=_microphone_commit(app),
+    )
+
+
+def _microphone_processors(app: FastAPI) -> Sequence[FrameProcessor]:
+    supplied = app.state.microphone_processors
+    if supplied is not None:
+        return supplied
+    return direct_source_processors(app.state.settings.deepgram_api_key)
+
+
+def _microphone_recorder(
+    app: FastAPI,
+    *,
+    tenant_id: int,
+    session_id: int,
+    source_id: str,
+    started_at: datetime,
+) -> MicrophoneRecorder | None:
+    factory = app.state.recorder_factory
+    if factory is not None:
+        return factory(tenant_id, session_id, source_id, started_at)
+    if app.state.engine is None:
+        return None
+    storage = app.state.object_storage
+    if storage is None:
+        storage = s3_object_storage(app.state.settings)
+        app.state.object_storage = storage
+    return DirectSourceRecording(
+        tenant_id=tenant_id,
+        session_id=session_id,
+        source_id=recording_source_id(source_id),
+        session_started_at=started_at,
+        storage=storage,
+        catalog=DatabaseMediaCatalog(app.state.engine),
+    )
+
+
+def _microphone_commit(app: FastAPI) -> TranscriptCommit:
+    supplied = app.state.transcript_commit
+    if supplied is not None:
+        return supplied
+    return _transcript_commit(app)
+
+
+def _transcript_commit(app: FastAPI) -> TranscriptCommit:
+    def commit(
+        candidate: TranscriptCandidate,
+        *,
+        session_speaker_id: int | None,
+        provenance: MediaProvenance | None,
+    ) -> int:
+        if app.state.engine is None:
+            raise RuntimeError("transcript commit is unavailable")
+        command = FinalizeTranscript(
+            tenant_id=candidate.context.tenant_id,
+            session_id=candidate.context.session_id,
+            text=candidate.text,
+            start_ms=candidate.start_ms,
+            end_ms=candidate.end_ms,
+            session_speaker_id=session_speaker_id,
+            media_object_id=None if provenance is None else provenance.media_object_id,
+            media_start_offset_ms=None if provenance is None else provenance.media_start_offset_ms,
+            media_end_offset_ms=None if provenance is None else provenance.media_end_offset_ms,
+        )
+        with app.state.engine.connect() as connection:
+            finalized = finalize_transcript(connection, command, app.state.publisher)
+        return finalized.session_speaker_id
+
+    return commit
 
 
 async def _release_peer(app: FastAPI, key: tuple[int, int], generation: int) -> None:

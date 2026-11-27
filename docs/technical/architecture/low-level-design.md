@@ -120,6 +120,7 @@ ceho/
 │   ├── turn.py         # short-lived Cloudflare TURN credentials
 │   ├── session.py      # session persistence, lifecycle, and finalization
 │   ├── pipeline.py     # Pipecat construction and pipeline-run lifecycle
+│   ├── microphone.py   # resample, record, and commit one connected microphone
 │   ├── transport.py    # transport port and media contracts
 │   ├── webrtc.py       # first transport implementation
 │   ├── media.py        # recording and media-object persistence
@@ -246,7 +247,7 @@ Events arrive in order: `SourceAdded`, then pressure and `OrderedFrame` values, 
 
 A track that finishes removes the source with `source_ended` and leaves the peer `connected`. `close`, a remote disconnect, or a media failure then closes the peer. Reasons are `client_disconnect`, `server_close`, `signaling_rejected`, `media_failed`, and `source_ended`. Closing a source does not end the session. The states after signaling are `connected`, `closing`, and `closed`.
 
-There is no talkback output, second track, recording, or transcript on this path.
+There is no talkback output or second track on this path. Recording and transcripts are attached by `microphone.py` after the source is connected.
 
 ## Pipeline design
 
@@ -289,7 +290,17 @@ A final provider result becomes a `TranscriptCandidate` when the trimmed text is
 
 Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller passes each final candidate to `finalize_transcript`.
 
-A caller that owns a connected direct source injects a `DirectSourceRecorder`. `push_audio` hands the chunk to that recorder after the PCM checks and before the frame is queued for speech-to-text. A recording failure cancels the run. `close()` finishes the recorder. The recorder implementation lives in `media.py`. The transcribe harness does not inject one.
+A caller that owns a connected direct source injects a `DirectSourceRecorder`. `push_audio` hands the chunk to that recorder after the PCM checks and before the frame is queued for speech-to-text. `push_audio` does not resample. A recording failure cancels the run. `close()` finishes the recorder. The recorder implementation lives in `media.py`. The transcribe harness does not inject one.
+
+### Connected microphone
+
+`microphone.py` reads `DirectSourceTransport.events()` and does not import `webrtc`. On `SourceAdded` it starts one `DirectSourceRun` for that source. Ordered `pcm_s16le` is resampled to 16 kHz, 16-bit, mono, then `push_audio` is called with that frame's timestamp. A browser offer commonly arrives as 48 kHz. A timestamp gap is pushed as it is: the discontinuity stays, and silence is not inserted for the hole.
+
+The server builds one `DirectSourceRecording` for that source. The transport source id is `{peer_id}/microphone`. The recorder's source id is `{peer_id}-microphone`, one path segment, so the object key stays `{tenant_id}/{session_id}/{peer_id}-microphone/{uuid}.pcm`.
+
+Each new `TranscriptCandidate` is passed to `finalize_transcript` with provenance from the recorder. The first final omits `session_speaker_id`. Later finals from that source pass the id returned for the previous final. Transcript text is not logged.
+
+`SourceRemoved` or `PeerClosed` stops the run and finishes the recorder. The session stays active. `QueuePressure` is logged and does not fail the run. A recording failure cancels the run and closes the peer with `media_failed`. A provider failure stays on the run's failure budget. Without `DEEPGRAM_API_KEY` the microphone is still recorded and no speech-to-text processor is built; the attachment logs `stt not configured`. With no database engine and no injected recorder, the watch drains events and does not open a run.
 
 ### Speaker handling
 
@@ -443,7 +454,7 @@ replacement for their projections or queues.
 
 CEHO records source audio for transcript playback and provenance. Recording storage is a shared S3 bucket: `CEHO_MEDIA_STORAGE_URI`. Local development points that bucket at MinIO. A pod or server's local filesystem is not a recording destination.
 
-One direct-source attachment is one multipart upload and one `media_objects` row. A later attachment, including a reconnect, opens another object. The recorder chooses the key `{tenant_id}/{session_id}/{source_id}/{uuid}.pcm`. The caller cannot choose it. Chunks are concatenated in accept order. Part numbers follow that order. A part is uploaded at 5 MiB, and finish uploads the shorter tail. The object is `audio/L16`, `pcm_s16le`, at the direct-source sample rate and channel count.
+One direct-source attachment is one multipart upload and one `media_objects` row. A later attachment, including a reconnect, opens another object. The recorder chooses the key `{tenant_id}/{session_id}/{source_id}/{uuid}.pcm`. For a connected microphone, `source_id` in that key is `{peer_id}-microphone`. The caller cannot choose the key. Chunks are concatenated in accept order. Part numbers follow that order. A part is uploaded at 5 MiB, and finish uploads the shorter tail. The object is `audio/L16`, `pcm_s16le`, at the direct-source sample rate and channel count.
 
 `accept` places each chunk on an in-process `asyncio` queue and returns. A writer task started on the first chunk uploads parts. The queue holds at most 1 MiB and the oldest chunk may wait at most 15 seconds. Those bounds are `RecordingConfig`. Past either bound, or when a part upload fails twice, the recorder aborts the upload, sets `write_status = failed`, and raises. `push_audio` then stops that source. The session row stays active. `finish` on a failed recording leaves the failed row and raises.
 
@@ -558,7 +569,7 @@ Hot-path code logs through `ceho.logging`. `get_logger(__name__)` is the only lo
 
 `ts`, `level`, `logger`, and `msg` are first, in that order. `ts` is UTC, ISO-8601, millisecond precision, with a `Z` suffix. Call fields follow, sorted by name. `exc` is last when the call carried an exception, as `type`, `msg`, and `trace`. The message is a static phrase. Ids go in fields (`tenant_id`, `session_id`, `source_id`, `outbox_id`). Transcript text, raw audio, and secrets are not fields.
 
-`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, each idle sweep, a sweep failure that will be retried, a critical line when startup configuration or the listen socket fails, a login that could not reach the account directory, a session request that failed outside the control rules, an accepted offer, and a signaling request rejected because the session is missing or ended. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `signaling.py` logs a rejected signaling credential and does not log the credential. `turn.py` logs a credential request, a minted credential, and a rejected or failed mint. It does not log the API token, the TURN username, or the TURN password. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, a rejected turn, a session create, join, and end, a rejected control request, a commit failure, an idle end that lost a race, and a session event that stayed pending. It does not log credentials. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` defines contracts and does not log. `webrtc.py` logs peer connected, source added, each delivered frame, queue pressure, a rejected frame, source removed, and peer closed. A rejected offer is an error. A media failure is an error, with the traceback when an exception was caught. SDP and PCM are not fields. The adapter cannot exit the process, so it does not log critical.
+`server.py` logs process start and stop, each outbox drain pass, a drain failure that will be retried, each idle sweep, a sweep failure that will be retried, a critical line when startup configuration or the listen socket fails, a login that could not reach the account directory, a session request that failed outside the control rules, an accepted offer, and a signaling request rejected because the session is missing or ended. `auth.py` logs a succeeded login and a rejected login or control credential. It does not log the password, the password hash, or the credential. `signaling.py` logs a rejected signaling credential and does not log the credential. `turn.py` logs a credential request, a minted credential, and a rejected or failed mint. It does not log the API token, the TURN username, or the TURN password. `pipeline.py` logs run start and stop, each accepted audio frame, a provider error, and a failed run. `outbox.py` logs a claim, a published event, a publish failure that leaves the row pending, an invalid payload, and a completion that is not pending. `session.py` logs the start of a transcript commit, the committed turn, a rejected turn, a session create, join, and end, a rejected control request, a commit failure, an idle end that lost a race, and a session event that stayed pending. It does not log credentials. `config.py` only raises configuration errors. `media.py` logs recording start and completion, a part upload retry, and a recording failure. `transport.py` defines contracts and does not log. `webrtc.py` logs peer connected, source added, each delivered frame, queue pressure, a rejected frame, source removed, and peer closed. A rejected offer is an error. A media failure is an error, with the traceback when an exception was caught. SDP and PCM are not fields. The adapter cannot exit the process, so it does not log critical. `microphone.py` logs the attachment, each resampled frame, queue pressure, a rejected frame, a recording or transcript failure, and the stop. It does not log transcript text or PCM. It cannot exit the process, so it does not log critical.
 
 Minimum metrics:
 
@@ -639,17 +650,18 @@ scheme fails at startup until `publisher_from_url` grows a branch for it. With
 an engine configured, the process drains pending outbox rows about once a
 second and ends idle sessions about every 30 seconds. A connected direct
 source is recorded when the caller injects a `DirectSourceRecorder`. The
-server does not attach one yet. Package layout for
+offer watch reads that microphone, resamples it, records it, and commits each
+final. Package layout for
 later hot-path modules is under [Target package structure](#target-package-structure).
 
 ## Implementation sequence
 
 1. ~~Define the control API and authentication/join-credential contract.~~ Done: password login, and create, join, reconnect, and end. The signaling credential is HMAC-SHA256 signed with `CEHO_SIGNALING_SECRET`. WebRTC binding remains step 3.
 2. ~~Add reviewed SQLAlchemy/Alembic changes for membership uniqueness, media objects, transcript provenance, users.external_ids, and outbox.~~ Done for the direct-source schema. Platform `users` are separate from `speakers` and `session_speakers`. Mapping status remains open.
-3. ~~Implement the transport port and WebRTC adapter.~~ Done for one direct microphone: the port, bounded queue, and Pipecat Small WebRTC peer. The offer route is mounted. The pipeline is not attached yet.
+3. ~~Implement the transport port and WebRTC adapter.~~ Done for one direct microphone: the port, bounded queue, Pipecat Small WebRTC peer, and the offer route. A connected microphone is resampled and attached to the direct-source run.
 4. ~~Implement session creation, joining, reconnect, explicit end, and idle termination.~~ Done in the control API. Stopping pipelines on end waits for the transport adapter.
-5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The server does not attach the recorder until a direct source is connected.
-6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates in memory. The caller passes them to `finalize_transcript`; the run is not wired to that call yet.
+5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The offer watch attaches that recorder when the microphone connects.
+6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates, and the connected-microphone attachment passes each one to `finalize_transcript`.
 7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals, session create, session end, and the `pgmq://` publisher. Another publisher scheme remains a branch in `publisher_from_url`.
 8. Validate direct-source attribution, then diarization for mixed sources.
 9. Add observability and staged load tests before estimating capacity.
