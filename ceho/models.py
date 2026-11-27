@@ -5,9 +5,9 @@ primary key. Child rows also reference (tenant_id, parent id) so a session,
 participant, or transcript cannot point at another tenant.
 
 Tenant 1 is the generic tenant. A row stored there is global to all tenants.
-channels is that catalog (WebRTC, Slack, Teams, and so on): a session may use
-a channel owned by its own tenant or by the generic tenant. A channel owned
-by any other tenant stays private to that tenant.
+channels is that catalog. The seeded row is WebRTC, owned by the generic
+tenant. A session may use a channel owned by its own tenant or by the generic
+tenant. A channel owned by any other tenant stays private to that tenant.
 
 A user is a platform login account. A speaker is a voice that can be
 attributed and may point at one user after that person confirms it. A session

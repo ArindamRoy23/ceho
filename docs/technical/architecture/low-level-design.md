@@ -191,6 +191,14 @@ Create returns the same ICE fields as join. The URLs are `CEHO_STUN_URL` (defaul
 
 The process must be reachable at its HTTPS origin from the browser that loaded the page.
 
+### Browser client
+
+The login and one-microphone page lives in `frontend/`. That directory is an npm package, `ceho-frontend`, and is not a uv workspace member. Vite builds it to static files. The page calls the hot server with relative URLs, so it uses the origin that served it.
+
+`/login`, `/`, and `/sessions/:sessionId` are client routes. `/` creates a session (`channel_id`, optional description) or opens an existing session by id. `/sessions/:sessionId` joins, captures one microphone, and posts one `sendonly` audio offer. Empty TURN fields are left out of the peer configuration. A refresh joins again. The control credential is kept in `sessionStorage` and is sent only on create, join, and end. The signaling credential and the TURN username and password stay in the call module for that page. Closing the page or stopping the track closes the peer and does not call end.
+
+In development, `npm run dev` in `frontend/` serves the page and proxies `POST /login`, `POST /sessions`, and `GET /health` to `http://127.0.0.1:8000` (`CEHO_DEV_PROXY` overrides the target). A non-POST request for `/login` or `/sessions` is the page, so a refresh returns `index.html`. In production the hot server still does not serve those files. A reverse proxy on the hot server's HTTPS origin serves the built files and forwards those POST paths to the process.
+
 The signaling credential authorizes signaling only. It is not a durable authorization grant or a control credential. Presented on create, join, or end, it is rejected.
 
 ### Disconnect, reconnect, and end
@@ -330,6 +338,8 @@ Identity columns use a sequence named `<table>_<column>_seq`. A text column is n
 Not implemented yet: mapping status and source identity on `session_speakers`.
 
 ### Channels
+
+The generic catalog is tenant 1. Upgrade inserts `channel_name` `WebRTC` there when that name is missing. A new database has no channels, so the identity assigns `channel_id` 1. The revision does not delete other channels. A later surface is another catalog row.
 
 `channel_name` is required and unique per tenant. A tenant channel cannot reuse a name from the generic catalog (tenant 1), and the catalog cannot take a name a tenant already uses. `channels_reject_generic_name_shadow` checks both directions and takes a transaction advisory lock on the name, so two concurrent inserts cannot both pass.
 

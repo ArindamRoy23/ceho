@@ -219,6 +219,21 @@ def test_storage_uri_cannot_be_reused(active_session: ActiveSession) -> None:
                 )
 
 
+def test_generic_catalog_is_the_webrtc_channel(active_session: ActiveSession) -> None:
+    with active_session.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT channel_id, tenant_id, channel_name
+                FROM ceho_core.channels
+                WHERE tenant_id = 1
+                ORDER BY channel_id
+                """
+            )
+        ).all()
+    assert rows == [(1, 1, "WebRTC")]
+
+
 def test_tenant_channel_cannot_reuse_a_generic_channel_name(
     active_session: ActiveSession,
 ) -> None:
