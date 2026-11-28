@@ -222,6 +222,7 @@ def _commit(connection: Connection, command: FinalizeTranscript) -> FinalizedTra
         tenant_id=command.tenant_id,
         session_id=command.session_id,
         turn_index=turn_index,
+        speaker_label=command.label,
         media_present=command.media_object_id is not None,
     )
     start_at = session["started_at"] + timedelta(milliseconds=command.start_ms)
@@ -272,26 +273,18 @@ def _commit(connection: Connection, command: FinalizeTranscript) -> FinalizedTra
 
 
 def _session_speaker(connection: Connection, command: FinalizeTranscript) -> int:
-    speakers = _table(SessionSpeaker)
+    """Resolve the session speaker for one final.
+
+    A speaker label is the Deepgram speaker number. The same label in this
+    session reuses one row, and a new label inserts one with ``speaker_id``
+    left null. A final with no label keeps one unlabeled speaker for the
+    source: the first insert omits the id, and later finals pass it back.
+    """
+    if command.label is not None:
+        return _speaker_for_label(connection, command)
     if command.session_speaker_id is None:
-        try:
-            return int(
-                connection.execute(
-                    insert(speakers)
-                    .values(
-                        tenant_id=command.tenant_id,
-                        session_id=command.session_id,
-                        label=command.label,
-                    )
-                    .returning(speakers.c.session_speaker_id)
-                ).scalar_one()
-            )
-        except IntegrityError as error:
-            if "session_speakers_label_unique" not in str(error):
-                raise
-            raise InvalidTranscript(
-                f"session speaker label {command.label!r} is already used in this session"
-            ) from error
+        return _insert_session_speaker(connection, command)
+    speakers = _table(SessionSpeaker)
     found = connection.execute(
         select(speakers.c.session_speaker_id).where(
             speakers.c.tenant_id == command.tenant_id,
@@ -305,6 +298,53 @@ def _session_speaker(connection: Connection, command: FinalizeTranscript) -> int
             f"in session {command.session_id}"
         )
     return int(found)
+
+
+def _speaker_for_label(connection: Connection, command: FinalizeTranscript) -> int:
+    found = _find_speaker_label(connection, command)
+    if found is not None:
+        return found
+    try:
+        with connection.begin_nested():
+            return _insert_session_speaker(connection, command)
+    except IntegrityError as error:
+        if "session_speakers_label_unique" not in str(error):
+            raise
+        found = _find_speaker_label(connection, command)
+        if found is None:
+            raise InvalidTranscript(
+                f"session speaker label {command.label!r} is already used in this session"
+            ) from error
+        return found
+
+
+def _find_speaker_label(connection: Connection, command: FinalizeTranscript) -> int | None:
+    speakers = _table(SessionSpeaker)
+    found = connection.execute(
+        select(speakers.c.session_speaker_id).where(
+            speakers.c.tenant_id == command.tenant_id,
+            speakers.c.session_id == command.session_id,
+            speakers.c.label == command.label,
+        )
+    ).scalar_one_or_none()
+    if found is None:
+        return None
+    return int(found)
+
+
+def _insert_session_speaker(connection: Connection, command: FinalizeTranscript) -> int:
+    speakers = _table(SessionSpeaker)
+    return int(
+        connection.execute(
+            insert(speakers)
+            .values(
+                tenant_id=command.tenant_id,
+                session_id=command.session_id,
+                label=command.label,
+            )
+            .returning(speakers.c.session_speaker_id)
+        ).scalar_one()
+    )
 
 
 def _require_media(connection: Connection, command: FinalizeTranscript) -> None:

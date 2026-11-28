@@ -64,7 +64,7 @@ A transport peer can carry multiple audio sources, and an audio source can conta
 
 ### Session speaker
 
-A **session speaker** is one voice inside one session, stored in `ceho_core.session_speakers`. A session, a connection, and a platform user can each involve many session speakers. `speaker_id` is optional, so a voice can be recorded before it is linked to a speaker. `label` is the session-local name, such as `speaker_1`, and is unique within the session when it is set. A transcript attributes a turn to `session_speaker_id`. The label is not inferred from the transport connection alone.
+A **session speaker** is one voice inside one session, stored in `ceho_core.session_speakers`. A session, a connection, and a platform user can each involve many session speakers. `speaker_id` is optional, so a voice can be recorded before it is linked to a speaker. `label` is the session-local name. Direct-source diarization stores the Deepgram speaker number, such as `0`. The label is unique within the session when it is set. A transcript attributes a turn to `session_speaker_id`. The label is not inferred from the transport connection alone.
 
 ### Pipeline run
 
@@ -282,11 +282,11 @@ Pipecat capabilities, streaming-provider behavior, measured latency, and quality
 
 ### Direct-source STT run
 
-`DirectSourceRun` supervises one Pipecat task for one direct source. Callers push ordered PCM in the format of `DirectSourcePipelineConfig` in `ceho.hot.config`: 16 kHz, 16-bit, mono, with the provider-failure bound on that same type. That type is separate from `HotServerSettings`, which holds process and environment settings. The processors in front of the candidate sink are injected, so a later VAD stage or a different STT service can be inserted without changing the candidate type. The live list is one Deepgram speech-to-text processor. There is no voice activity detector, diarization, language model, speech synthesizer, or talkback output. Pipecat RTVI and turn tracking are off.
+`DirectSourceRun` supervises one Pipecat task for one direct source. Callers push ordered PCM in the format of `DirectSourcePipelineConfig` in `ceho.hot.config`: 16 kHz, 16-bit, mono, with the provider-failure bound on that same type. That type is separate from `HotServerSettings`, which holds process and environment settings. The processors in front of the candidate sink are injected, so a later VAD stage or a different STT service can be inserted without changing the candidate type. The live list is one Deepgram speech-to-text processor with diarization on. There is no voice activity detector, language model, speech synthesizer, or talkback output. Pipecat RTVI and turn tracking are off.
 
 `DEEPGRAM_API_KEY` is not required to start the hot server. It is required only when that Deepgram processor is constructed. `python -m tests.hot.transcribe RECORDING.wav` is a test harness that sends one prerecorded file through this run and prints candidates. It does not write the database.
 
-A final provider result becomes a `TranscriptCandidate` when the trimmed text is non-empty. The candidate carries the direct-source context, including the expected `session_speaker_id`, plus the session-timeline start and end in milliseconds. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, and text is kept once.
+A final provider result becomes one or more `TranscriptCandidate` values when the trimmed text is non-empty. Each candidate carries the direct-source context, including the expected `session_speaker_id`, plus the session-timeline start and end in milliseconds and an optional `speaker_label`. The first pushed frame's timestamp is the origin. Word bounds on the provider result are the speech interval when they are present; otherwise the result's start and duration are used. When words carry a Deepgram speaker number, a change of that number splits the final. Each piece keeps its own text and speech interval, and `speaker_label` is that number (`0`, `1`, and so on). One speaker number keeps the provider transcript as a single candidate with that label. A result with no speaker number stays one candidate and leaves `speaker_label` empty. Interim text stays on the run as `partial_text` and is not a candidate. The same start, end, text, and speaker label is kept once.
 
 Each provider error is a `PipelineFailure`. The third error, or any fatal error, cancels that run and drops later results. `close()` finishes the run after queued audio is flushed. `RunStopped.ends_session` is false: source closure does not end the durable session. This module does not import session persistence, media storage, or the outbox. The caller passes each final candidate to `finalize_transcript`.
 
@@ -298,15 +298,15 @@ A caller that owns a connected direct source injects a `DirectSourceRecorder`. `
 
 The server builds one `DirectSourceRecording` for that source. The transport source id is `{peer_id}/microphone`. The recorder's source id is `{peer_id}-microphone`, one path segment, so the object key stays `{tenant_id}/{session_id}/{peer_id}-microphone/{uuid}.pcm`.
 
-Each new `TranscriptCandidate` is passed to `finalize_transcript` with provenance from the recorder. The first final omits `session_speaker_id`. Later finals from that source pass the id returned for the previous final. Transcript text is not logged.
+Each new `TranscriptCandidate` is passed to `finalize_transcript` with provenance from the recorder. A candidate with a `speaker_label` is committed with that label and without the previous session speaker id, so each Deepgram number resolves to its own session speaker. A candidate with no label follows the unlabeled source: the first final omits `session_speaker_id`, and later unlabeled finals from that source pass the id returned for the previous unlabeled final. Transcript text is not logged.
 
 `SourceRemoved` or `PeerClosed` stops the run and finishes the recorder. The session stays active. `QueuePressure` is logged and does not fail the run. A recording failure cancels the run and closes the peer with `media_failed`. A provider failure stays on the run's failure budget. Without `DEEPGRAM_API_KEY` the microphone is still recorded and no speech-to-text processor is built; the attachment logs `stt not configured`. With no database engine and no injected recorder, the watch drains events and does not open a run.
 
 ### Speaker handling
 
-For a direct authenticated source, the server has a strong candidate for the originating session speaker. The direct-source STT run does not insert `session_speakers`. `finalize_transcript` does, in the same transaction as the transcript. The first final turn from a source omits `session_speaker_id` and creates one row in that session. Later finals from the same source pass the returned id and reuse it. A different source creates its own row as its speech arrives. Each session has its own session speakers.
+For a direct authenticated source, the server has a strong candidate for the originating session speaker, but one microphone can still contain more than one voice. The direct-source STT run does not insert `session_speakers`. `finalize_transcript` does, in the same transaction as the transcript. A final with a speaker label finds or creates one row in that session whose `label` is the Deepgram speaker number and whose `speaker_id` stays null. The same number on a later final reuses that row. A final with no speaker number and no `session_speaker_id` creates one unlabeled row. Later unlabeled finals from the same source pass the returned id and reuse it. A different source creates its own unlabeled row as its speech arrives. Each session has its own session speakers.
 
-For a mixed source, diarization produces one or more session speakers. Linking a session speaker to a speaker, and a speaker to a platform user, is a separate confirmation. User recognition and cross-session voice recognition are not part of this pipeline.
+Linking a session speaker to a speaker, and a speaker to a platform user, is a separate confirmation. User recognition and cross-session voice recognition are not part of this pipeline. The recorded object stays one PCM stream for the microphone. Diarization attributes transcripts; it does not write a separate audio object per voice.
 
 ### Finalization
 
@@ -384,7 +384,8 @@ platform user sets `user_id` to null and leaves the speaker row.
 unique constraint on `(tenant_id, session_id, speaker_id)` stops a known
 speaker from appearing twice in that session. PostgreSQL treats nulls as
 distinct, so unlinked voices can repeat. `label` is null or a non-blank
-session-local name, unique within the session when set.
+session-local name, unique within the session when set. Direct-source
+diarization stores the Deepgram speaker number there, such as `0` or `1`.
 
 A session speaker is the transcript's speaker attribute. One known speaker can
 have several peers over time, and an observed voice may have no speaker row
@@ -470,7 +471,7 @@ The transcript write is the hot path's atomic durable operation. `finalize_trans
 
 1. Locks the session row (`SELECT … FOR UPDATE`).
 2. Confirms the session exists and is active.
-3. Resolves or creates the local session speaker. A missing `session_speaker_id` inserts one row for this session. A supplied id must already belong to this tenant and session.
+3. Resolves or creates the local session speaker. A speaker label finds the row with that label in this session, or inserts one with `speaker_id` null. A missing `session_speaker_id` and a missing label inserts one unlabeled row. A supplied id, used when there is no label, must already belong to this tenant and session.
 4. Allocates the next per-session `turn_index` in SQL as `COALESCE(MAX(turn_index), -1) + 1`, starting at 0.
 5. Inserts the final transcript. `start_at` and `end_at` are `session.started_at` plus the candidate's session-timeline milliseconds. Media provenance is all three fields or none, and the media row must belong to this session.
 6. Allocates the next per-session outbox `sequence` with the same SQL expression. `sequence` is not `turn_index`: both event types share `sequence`, and the payload carries `turn_index`.
@@ -663,7 +664,7 @@ later hot-path modules is under [Target package structure](#target-package-struc
 5. ~~Implement recording to durable shared/object storage.~~ Done for one direct-source attachment: a bounded in-process queue, one S3 multipart object, and a `media_objects` row. The offer watch attaches that recorder when the microphone connects.
 6. ~~Build a minimal Pipecat spike that emits final candidates from one source.~~ Done: the direct-source Deepgram STT run emits candidates, and the connected-microphone attachment passes each one to `finalize_transcript`.
 7. ~~Implement transcript transactions and the outbox publisher.~~ Done for direct-source finals, session create, session end, and the `pgmq://` publisher. Another publisher scheme remains a branch in `publisher_from_url`.
-8. Validate direct-source attribution, then diarization for mixed sources.
+8. ~~Validate direct-source attribution, then diarization for one microphone.~~ Done: a Deepgram speaker number is a `session_speakers.label`, and each final points at that row. Linking the row to a platform user, and mixed-source capture beyond this microphone, remain open.
 9. Add observability and staged load tests before estimating capacity.
 10. Design ownership leases before deploying more than one hot-server instance.
 
@@ -671,8 +672,8 @@ later hot-path modules is under [Target package structure](#target-package-struc
 
 ## Open decisions
 
-- The first direct-source graph is Deepgram STT with no VAD, diarization, LLM, or talkback. Whether later sources insert VAD, and which Deepgram model stays configured, remain open. The candidate contract stays fixed.
-- Whether diarization runs for every direct source or only channels that may mix speakers. -- Later feature Idea
+- The first direct-source graph is Deepgram STT with diarization and no VAD, LLM, or talkback. Whether later sources insert VAD, and which Deepgram model stays configured, remain open. The candidate contract stays fixed.
+- Linking a diarized session speaker to `speakers` or to a platform user. The session-speaker `label` is the Deepgram speaker number, and `speaker_id` stays null until that confirmation.
 - Initial codec and frame duration for sources after this first microphone. The direct adapter declares the offer's rtpmap on `SourceAdded`, delivers decoded PCM, and allows one source per peer.
 - Raw-audio retention, encryption, deletion, and access control.
 - The supported in-progress-speech loss window after a peer disconnects. Idle termination defaults to 900 seconds (`CEHO_SESSION_IDLE_TIMEOUT_SECONDS`).
