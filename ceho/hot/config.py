@@ -119,12 +119,24 @@ def _port_value(environment: Mapping[str, str]) -> int:
 
 @dataclass(frozen=True)
 class DirectSourcePipelineConfig:
-    """PCM format and provider-failure bound for one direct-source STT run."""
+    """PCM format, speech provider, and provider-failure bound for one direct source.
+
+    ``stt_provider`` selects how a final result is read. ``deepgram`` is the
+    live provider and is the only one whose word speaker numbers are split
+    into separate candidates.
+    """
 
     sample_rate: int = 16_000
     sample_width: int = 2
     channels: int = 1
     max_provider_failures: int = 3
+    stt_provider: str = "deepgram"
+
+    def __post_init__(self) -> None:
+        provider = self.stt_provider.strip().lower()
+        if not provider:
+            raise ConfigurationError("stt_provider must be configured")
+        object.__setattr__(self, "stt_provider", provider)
 
     def frame_bytes(self, frame_ms: int) -> int:
         """Return the PCM size of one frame at this format."""

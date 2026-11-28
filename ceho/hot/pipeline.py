@@ -5,8 +5,9 @@ candidates. Interim text stays on the run. This module does not write the
 database, publish events, or produce talkback audio.
 
 The processors in front of the candidate sink are injected. The live path
-uses Deepgram speech-to-text with diarization. There is no voice activity
-detector, language model, or speech synthesizer.
+uses Deepgram speech-to-text. Speaker numbers on a final are split only when
+the direct-source config names Deepgram. There is no voice activity detector,
+language model, or speech synthesizer.
 """
 
 from __future__ import annotations
@@ -460,7 +461,11 @@ class DirectSourceRun:
     def _note_final(self, frame: TranscriptionFrame) -> None:
         if not self._accepting_candidates:
             return
-        pieces = _speaker_pieces(frame.text, frame.result)
+        if self._config.stt_provider == "deepgram":
+            pieces = _speaker_pieces(frame.text, frame.result)
+        else:
+            text = frame.text.strip()
+            pieces = [(text, None, None)] if text else []
         if len(pieces) > 1:
             logger.debug(
                 "final split",

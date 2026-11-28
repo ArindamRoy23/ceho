@@ -16,7 +16,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from ceho.hot.config import DIRECT_SOURCE_PIPELINE, ConfigurationError
+from ceho.hot.config import DIRECT_SOURCE_PIPELINE, ConfigurationError, DirectSourcePipelineConfig
 from ceho.hot.pipeline import (
     DirectSourceContext,
     DirectSourceRun,
@@ -197,9 +197,10 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         *,
         pcm: bytes | None = b"\x00\x00",
         timestamp_ms: int = 1000,
+        config: DirectSourcePipelineConfig = DIRECT_SOURCE_PIPELINE,
     ) -> tuple[DirectSourceRun, RunStopped]:
         context = _context()
-        run = DirectSourceRun(context, processors)
+        run = DirectSourceRun(context, processors, config=config)
         await run.start()
         try:
             if pcm is not None:
@@ -275,6 +276,32 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
                 ("First Jensen.", "1", 2200, 3000),
             ],
         )
+
+    async def test_another_provider_keeps_one_final_when_words_have_speaker_numbers(self) -> None:
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        _transcription(
+                            "I think. First Jensen.",
+                            start=0.0,
+                            duration=2.0,
+                            words=[
+                                _Word(0.2, 0.6, speaker=0, word="I", punctuated="I"),
+                                _Word(0.6, 1.0, speaker=0, word="think", punctuated="think."),
+                                _Word(1.2, 1.6, speaker=1, word="First", punctuated="First"),
+                                _Word(1.6, 2.0, speaker=1.0, word="Jensen", punctuated="Jensen."),
+                            ],
+                        )
+                    ]
+                )
+            ],
+            config=DirectSourcePipelineConfig(stt_provider="other"),
+        )
+
+        self.assertEqual(len(run.candidates), 1)
+        self.assertEqual(run.candidates[0].text, "I think. First Jensen.")
+        self.assertIsNone(run.candidates[0].speaker_label)
 
     async def test_one_speaker_number_keeps_the_provider_text(self) -> None:
         run, _stopped = await self._collect(
