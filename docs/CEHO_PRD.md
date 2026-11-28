@@ -1,16 +1,59 @@
-# *THIS IS LEGACY DOCUMENT, NOT A SOURCE OF TRUTH. LOT HAS CHANGED SINCE THIS WAS WRITTEN. PLEASE REFER TO THE TECHNICAL DESIGNS AND OTHER DOCUMENTS FOR THE CURRENT STATE OF THE PRODUCT.*
-
-
 # Product Requirements Document: CEHO Conversational Intelligence Platform
 
 ## 1. Document status
 
-- **Status:** Comprehensive draft
-- **Purpose:** Capture the complete product and platform vision before decomposition
-- **Scope:** Initial product, foundational architecture, and long-term opportunities
-- **Next step:** Break this document into release PRDs, technical designs, and experiments
+- **Status:** Vision, with a decided first version
+- **Date of the first-version decisions:** 2026-11-28
+- **Purpose:** Capture the product vision, and record the first version that was settled against the wireframes
+- **Scope:** The first version below, then the longer vision
+- **Cold product:** [Sensemaker product requirements](sensemaker/PRD.md)
 
-This document is intentionally broad. Inclusion does not mean every capability belongs in the first release.
+This document is the vision. It is not the backlog. The first version is the current cut of that vision. Where a later section conflicts with it, the first version wins. Inclusion in the later sections does not put a capability in the first version.
+
+## First version
+
+The first version is one site with two products behind it. Hot CEHO captures conversations. Sensemaker, specified in its own PRD, reads what hot publishes and produces topic reports, answers, and votes. There is one login form and one project list. Hot stores projects, accounts, and sessions. Sensemaker stores reports, votes, and chats. Sensemaker does not write the project.
+
+### People
+
+Hot is the only login service. The first cut uses an id and a password. An admin and a user are two roles on that account list. Sensemaker has no accounts of its own. It trusts hot for who is signed in, which role they have, and which projects they belong to.
+
+An admin runs the control plane: projects, membership, retention, how long published events are kept, language, where recordings sit, and which Sensemaker tools this client may use. Tool settings are Sensemaker data. The person who changes them is a hot admin.
+
+A user sees the projects they belong to, works in sessions, reads reports, asks, and runs votes. A user may start, end, and discard sessions they started. An admin may do that for any session in the tenant. Sensemaker keeps that person's chats, vote questions, and report requests under the hot user id. Membership is read from hot. Removing a user, or taking them off a project, reaches Sensemaker so that project and those chats stop being reachable.
+
+### Projects and sessions
+
+Hot is the only writer of a project: its name, members, tags, and sessions. A session is filed in one project. Tags filter sessions. They are not topics.
+
+The session screen shows when the session happened, how long it ran, failure, and the empty and in-between states. The controls are play, pause, stop, and discard.
+
+- Play starts or resumes capture.
+- Pause keeps the session open and does not release it.
+- Stop ends the session and releases its finished turns.
+- Discard drops the take. It never becomes a report.
+
+A live WebRTC session and an uploaded recording are both ways into the same session object. The first beta captures through WebRTC only. Each person who joins a live session sees a consent prompt before capture starts, in the manner of a meeting app.
+
+Language, where recordings are stored, how long recordings are kept, and how long published events stay available are hot settings. Deleting a session deletes its audio and turns on hot and publishes the removal. Sensemaker then drops what it stored from that session.
+
+### What hot publishes
+
+Sensemaker's freshness rule is the published set, so hot does not publish a live guess that is about to be replaced. A partial transcript stays inside the session. Hot publishes:
+
+- a session opening, carrying the tenant, the project, and the session
+- a session closing
+- a session removal
+- a finished turn, with its speaker, time span, and text
+- a revision or a retraction of a finished turn
+- a voice being linked, merged, or unlinked
+- a user being removed, or a project membership changing
+
+Sensemaker can run on the session speaker alone. Linking a voice to a person, merging two voices, or unlinking them can happen during the session or later, including after an upload. Until that link, the voice stays unnamed. Hot owns the person. Sensemaker does not invent one.
+
+### What the first version leaves for later
+
+Social login, channels other than WebRTC, a marketplace of further cold workers, a separate hot configuration dashboard, redaction of a span, a model refusing to answer, a page per person, pinning a topic, and filters that narrow Ask or a vote below the whole project. The settings a configuration dashboard would have held already sit on the admin control plane.
 
 ## 2. Product thesis
 
@@ -21,7 +64,7 @@ CEHO will turn live interactions into structured, searchable, actionable knowled
 1. A high-fidelity transcript with timestamps, confidence, revision history, and source provenance.
 2. Asynchronous contextual memory that organizes people, topics, claims, decisions, commitments, actions, and other durable meaning.
 
-Over time, the same foundation will support shared projects, cross-conversation identity and memory, real-time guidance, specialized agents, integrations, automation, analytics, multimodal streams, and developer APIs.
+The first version is one hot capture product and one cold Sensemaker, described above and in the Sensemaker PRD. Over time, the same foundation can support further cold workers, cross-conversation identity, real-time guidance, specialized agents, integrations, automation, analytics, multimodal streams, and developer APIs.
 
 ## 3. Executive summary
 
@@ -1659,6 +1702,8 @@ The platform should support privacy-safe monitoring, explicit user feedback, cor
 
 ## 35. Phased delivery
 
+The first version is not Phase 1 alone, and it does not wait for Phase 7 to have projects. It is the hot session product and one Sensemaker: projects owned by hot, WebRTC capture, published finished turns, and Sensemaker reports, answers, and votes. The phases below remain the longer map. They do not add scope to the first version.
+
 
 
 ### Phase 0: Contracts and measurement
@@ -1778,20 +1823,17 @@ The platform should support privacy-safe monitoring, explicit user feedback, cor
 
 ## 36. Initial milestone acceptance criteria
 
-The first architectural milestone is complete when:
+The first version is complete when the behavior in [First version](#first-version) and in the Sensemaker PRD holds end to end:
 
-1. A user can hold a live conversation through one persistent connection for the full interaction.
-2. Partial transcript output appears incrementally and final output stabilizes.
-3. Conversation state survives a supported reconnect.
-4. Multiple local speakers remain distinguishable across the conversation.
-5. Turns use natural boundaries and can be revised before finalization.
-6. Transcript events include stable IDs, timestamps, status, confidence, and revision metadata.
-7. Downstream consumers can process update and finalization events idempotently.
-8. A user can navigate from transcript text to source audio.
-9. The system produces a provenance-rich transcript plus asynchronous contextual memory.
-10. Only stable source events become durable memory by default.
-11. Quality, latency, reliability, and cost are measured and published for this milestone.
-12. Consent, retention, tenant isolation, and deletion behavior are defined for all stored artifacts.
+1. An admin and a user sign in with an id and password on one site. Sensemaker accepts that login and does not keep its own accounts.
+2. An admin manages projects, membership, retention, event lifetime, language, recording location, and which Sensemaker tools the client may use. A user sees only their projects.
+3. A user starts, pauses, ends, and discards their own session. An admin can do the same for any session in the tenant. Ending a session publishes its finished turns. Discarding one publishes nothing for Sensemaker to keep. A joiner sees a consent prompt before capture.
+4. Live guesses stay off the bus. Finished turns, revisions, retractions, session open and close, removal, voice links, and membership changes are what hot publishes.
+5. A voice can stay unnamed through capture and upload, and can be linked, merged, or unlinked later. Sensemaker does not invent the person.
+6. Deleting a session removes it on hot and what Sensemaker stored from it. Removing a user, or their membership, makes that Sensemaker project unreachable to them.
+7. A person can ask across the whole project, including turns already published from a session that is still open, and can open a cited answer. A stored answer stays as it was until someone asks again.
+8. A person can name a subject and ask for a topic report, read it, and ask for a new edition. They cannot edit the report text. The report shows whether it has consumed the project's published events.
+9. A person can submit a question and explicit choices and see, per person and per session over time, who lines up. No vote runs before that submission.
 
 Numeric thresholds will be set from the milestone measurements and the target workflows.
 
@@ -1894,52 +1936,52 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 
 ### Initial product
 
-- Which user and workflow is the first sharp wedge?
-- Is the initial experience a meeting assistant, call assistant, standalone web conversation, or embedded API?
-- Which languages, channels, and maximum conversation lengths are required at launch?
-- Is spoken response required in the first milestone, or is transcript and text talkback sufficient?
-- What is the acceptable transcript stabilization delay?
-- How should partial revisions be displayed without distracting users?
+Decided in the first version: one web site, WebRTC capture, projects owned by hot, and Sensemaker for reports, questions, and votes. Language and where recordings sit are hot settings. Still open:
+
+- Which workflow is the first sharp wedge beyond that cut
+- Maximum conversation length at launch
+- Whether spoken response is required, or transcript and text answers are enough
+- What transcript stabilization delay is acceptable
+- How partial revisions are shown without distracting the room. Partials are not published to Sensemaker.
 
 
 
 ### Speaker and identity
 
-- When should CEHO ask a user to name a local speaker?
-- Which identity evidence is permitted in each target market?
-- Is voice matching opt-in per user, project, or organization?
-- What confidence requires human confirmation?
-- How are guests and shared devices handled?
+Decided in the first version: Sensemaker keys off the session speaker until a person explicitly links, merges, or unlinks that voice, including after upload. Automatic voice matching across sessions is not in the first version. Still open:
+
+- Which identity evidence is permitted in each target market
+- How guests and shared devices are handled
 
 
 
 ### Memory
 
-- Which memory types are created automatically?
-- Which facts require user confirmation?
-- What are default retention periods at each memory level?
-- How should contradictions and changing opinions be represented?
-- When does a conversation memory promote to project or person memory?
+Decided in the Sensemaker PRD: people read topic reports, agents write them, and a report is not rewritten when hot publishes. A person asks across the whole project. A vote keeps a person's choice over time. Retention of recordings and of published events is hot configuration. Still open:
+
+- Default retention periods
+- How a contradiction is shown inside a report edition beyond keeping the earlier edition
 
 
 
 ### Projects
 
-- Can one conversation belong to multiple projects?
-- How do source permissions intersect when projects are composed?
-- Are composed projects materialized or evaluated dynamically?
-- Who can split, merge, or relink project scopes?
-- How are project policies inherited?
+Decided in the first version: hot alone writes the project, a session belongs to one project, and tags only filter sessions. Still open:
+
+- Can one session belong to multiple projects later
+- How composed projects would intersect permissions
+- Who can split, merge, or relink projects
+- How project policies are inherited
 
 
 
 ### Agents and insights
 
-- Which agent is the first productized expert?
-- What may an agent say unprompted?
-- Which alerts justify interrupting a live conversation?
-- How are multi-agent conflicts resolved?
-- Which actions always require approval?
+Decided for the first version: Sensemaker is the cold product. Report and answer text is written when a person asks. A vote runs only after a person submits a question and choices. Tools are enabled per client by an admin and are not a fixed catalog. Still open:
+
+- Which alerts would justify interrupting a live conversation
+- How multi-agent conflicts are resolved
+- Which tool actions always require approval
 
 
 
@@ -1963,7 +2005,7 @@ Numeric thresholds will be set from the milestone measurements and the target wo
 
 ## 40. Decisions explicitly deferred
 
-- WebRTC versus another persistent transport in every client environment
+- Transports other than WebRTC. The first beta captures through WebRTC only.
 - Event bus and storage implementation
 - Specific ASR, diarization, TTS, LLM, multimodal, embedding, and retrieval vendors
 - Vector database versus hybrid or graph storage implementation
