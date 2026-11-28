@@ -881,3 +881,46 @@ async def test_small_webrtc_loopback_delivers_pcm_from_one_microphone() -> None:
     assert frame.channel_count >= 1
     assert frame.sequence >= 1
     assert isinstance(seen[-1], PeerClosed)
+
+
+def test_decoded_pcm_keeps_only_the_valid_samples() -> None:
+    from ceho.hot.webrtc import _pcm_frame
+
+    sample_count = 960
+    channels = 1
+    audio = bytes((index % 251) + 1 for index in range(sample_count * channels * 2))
+    padding = b"\x00\x00" * 4800
+
+    class _Name:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _Layout:
+        def __init__(self, count: int) -> None:
+            self.channels = [object()] * count
+
+    class _Decoded:
+        def __init__(self) -> None:
+            self.sample_rate = 48_000
+            self.samples = sample_count
+            self.layout = _Layout(channels)
+            self.planes = [audio + padding]
+
+    class _Packed:
+        format = _Name("flt")
+        sample_rate = 48_000
+        samples = sample_count
+        pts = None
+        time_base = None
+        layout = _Layout(channels)
+
+        def reformat(self, *, format: str) -> _Decoded:
+            assert format == "s16"
+            return _Decoded()
+
+    decoded = _pcm_frame(_Packed())
+    assert decoded.codec == "pcm_s16le"
+    assert decoded.sample_rate == 48_000
+    assert decoded.channel_count == channels
+    assert decoded.duration_ms == 20
+    assert decoded.payload == audio
