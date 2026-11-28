@@ -165,12 +165,17 @@ async def attach_microphone(
                 )
                 continue
             try:
-                speaker_id = await asyncio.to_thread(
+                # A speaker number is resolved by label. Passing the previous
+                # id would keep every voice on the first session speaker.
+                labeled = candidate.speaker_label is not None
+                resolved = await asyncio.to_thread(
                     commit,
                     candidate,
-                    session_speaker_id=speaker_id,
+                    session_speaker_id=None if labeled else speaker_id,
                     provenance=provenance,
                 )
+                if not labeled:
+                    speaker_id = resolved
             except Exception:
                 logger.exception(
                     "transcript commit failed",

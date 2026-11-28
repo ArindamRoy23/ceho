@@ -384,14 +384,186 @@ def test_media_provenance_is_stored_together(active_session: ActiveSession) -> N
     assert transcript["media_end_offset_ms"] == 80
 
 
-def test_duplicate_session_speaker_label_is_rejected(active_session: ActiveSession) -> None:
+def test_speaker_numbers_store_two_transcripts_and_leave_speaker_id_null(
+    active_session: ActiveSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG", logger="ceho.hot.session")
+    first_text = "I think that the circular financing is good."
+    second_text = "First of all, Jensen, he stepped down"
     with active_session.connect() as connection:
-        finalize_transcript(connection, _command(active_session, label="speaker_1"))
-        with pytest.raises(InvalidTranscript, match="label"):
-            finalize_transcript(
-                connection, _command(active_session, text="other", label="speaker_1")
+        first = finalize_transcript(
+            connection,
+            _command(
+                active_session,
+                text=first_text,
+                label="0",
+                start_ms=240,
+                end_ms=2_639,
+            ),
+        )
+        second = finalize_transcript(
+            connection,
+            _command(
+                active_session,
+                text=second_text,
+                label="1",
+                start_ms=9_400,
+                end_ms=11_480,
+            ),
+        )
+        rows = (
+            connection.execute(
+                select(as_table(SessionSpeaker)).where(
+                    as_table(SessionSpeaker).c.session_id == active_session.session_id
+                )
             )
-        assert _count(connection, Transcript, active_session.session_id) == 1
+            .mappings()
+            .all()
+        )
+        events = (
+            connection.execute(
+                select(as_table(OutboxEvent).c.payload).where(
+                    as_table(OutboxEvent).c.session_id == active_session.session_id,
+                    as_table(OutboxEvent).c.event_type == "transcript.created",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        transcript_count = _count(connection, Transcript, active_session.session_id)
+
+    assert transcript_count == 2
+    assert first.session_speaker_id != second.session_speaker_id
+    by_label = {row["label"]: row for row in rows}
+    assert set(by_label) == {"0", "1"}
+    assert by_label["0"]["speaker_id"] is None
+    assert by_label["1"]["speaker_id"] is None
+    assert by_label["0"]["session_speaker_id"] == first.session_speaker_id
+    assert by_label["1"]["session_speaker_id"] == second.session_speaker_id
+    assert {event["session_speaker_id"] for event in events} == {
+        first.session_speaker_id,
+        second.session_speaker_id,
+    }
+    logged = " ".join(
+        record.getMessage() for record in caplog.records if record.name == "ceho.hot.session"
+    )
+    fields = " ".join(
+        str(getattr(record, "ceho_fields", ""))
+        for record in caplog.records
+        if record.name == "ceho.hot.session"
+    )
+    assert first_text not in logged
+    assert second_text not in logged
+    assert first_text not in fields
+    assert second_text not in fields
+
+
+def test_same_speaker_number_reuses_the_session_speaker(
+    active_session: ActiveSession,
+) -> None:
+    with active_session.connect() as connection:
+        first = finalize_transcript(connection, _command(active_session, label="0"))
+        again = finalize_transcript(
+            connection,
+            _command(active_session, text="again", label="0", start_ms=3_000, end_ms=4_000),
+        )
+        supplied_other = finalize_transcript(
+            connection,
+            _command(
+                active_session,
+                text="still zero",
+                label="0",
+                session_speaker_id=first.session_speaker_id + 100,
+                start_ms=5_000,
+                end_ms=6_000,
+            ),
+        )
+        speakers = (
+            connection.execute(
+                select(
+                    as_table(SessionSpeaker).c.session_speaker_id,
+                    as_table(SessionSpeaker).c.speaker_id,
+                    as_table(SessionSpeaker).c.label,
+                ).where(as_table(SessionSpeaker).c.session_id == active_session.session_id)
+            )
+            .mappings()
+            .all()
+        )
+
+    assert again.session_speaker_id == first.session_speaker_id
+    assert supplied_other.session_speaker_id == first.session_speaker_id
+    assert len(speakers) == 1
+    assert speakers[0]["label"] == "0"
+    assert speakers[0]["speaker_id"] is None
+
+
+def test_missing_speaker_number_stores_one_unlabeled_session_speaker(
+    active_session: ActiveSession,
+) -> None:
+    with active_session.connect() as connection:
+        first = finalize_transcript(connection, _command(active_session))
+        second = finalize_transcript(
+            connection,
+            _command(
+                active_session,
+                text="second",
+                session_speaker_id=first.session_speaker_id,
+            ),
+        )
+        speaker = (
+            connection.execute(
+                select(as_table(SessionSpeaker)).where(
+                    as_table(SessionSpeaker).c.session_id == active_session.session_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        transcript_count = _count(connection, Transcript, active_session.session_id)
+
+    assert second.session_speaker_id == first.session_speaker_id
+    assert speaker["label"] is None
+    assert speaker["speaker_id"] is None
+    assert transcript_count == 2
+
+
+def test_concurrent_finals_with_one_speaker_number_share_a_row(
+    active_session: ActiveSession,
+) -> None:
+    barrier = threading.Barrier(2)
+    results: list[FinalizedTranscript] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def work(text: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            with active_session.connect() as connection:
+                finalized = finalize_transcript(
+                    connection,
+                    _command(active_session, text=text, label="0"),
+                )
+            with lock:
+                results.append(finalized)
+        except BaseException as error:  # pragma: no cover - assertion below reports it
+            with lock:
+                errors.append(error)
+
+    threads = [
+        threading.Thread(target=work, args=("one",)),
+        threading.Thread(target=work, args=("two",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert len({result.session_speaker_id for result in results}) == 1
+    with active_session.connect() as connection:
+        assert _count(connection, SessionSpeaker, active_session.session_id) == 1
+        assert _count(connection, Transcript, active_session.session_id) == 2
 
 
 def test_outbox_sequence_stays_independent_of_turn_index(

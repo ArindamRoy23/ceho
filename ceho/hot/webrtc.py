@@ -605,18 +605,21 @@ def ice_servers_for(relay: IceRelay) -> list[RTCIceServer]:
 
 
 def _pcm_frame(frame: Any) -> InboundAudio:
-    sample_rate = int(frame.sample_rate)
-    samples = int(frame.samples)
-    duration_ms = samples * 1000 // sample_rate if sample_rate else 0
     time_base = frame.time_base
     pts = frame.pts
     if pts is None or time_base is None:
         timestamp_ms = 0
     else:
         timestamp_ms = int(float(pts * time_base) * 1000)
-    channels = len(frame.layout.channels) or 1
     formatted = frame if frame.format.name == "s16" else frame.reformat(format="s16")
-    payload = bytes(formatted.planes[0])
+    sample_rate = int(formatted.sample_rate)
+    samples = int(formatted.samples)
+    channels = len(formatted.layout.channels) or 1
+    duration_ms = samples * 1000 // sample_rate if sample_rate else 0
+    # The plane buffer is the allocated linesize, which is larger than the
+    # decoded samples. The tail is zeros and must not be treated as audio.
+    sample_width = 2
+    payload = bytes(formatted.planes[0])[: samples * channels * sample_width]
     if duration_ms < 1:
         duration_ms = 1
     return InboundAudio(

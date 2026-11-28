@@ -15,8 +15,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from ceho.hot.config import DirectSourcePipelineConfig, RecordingConfig
 from ceho.hot.media import DirectSourceRecording, MediaProvenance, ObjectUpload, UploadedPart
 from ceho.hot.microphone import attach_microphone, direct_source_processors, recording_source_id
-from ceho.hot.pipeline import RunState
-from ceho.hot.server import create_app
+from ceho.hot.pipeline import DirectSourceContext, RunState, TranscriptCandidate
+from ceho.hot.server import _transcript_commit, create_app
 from ceho.hot.transport import (
     AudioFrame,
     CloseReason,
@@ -30,6 +30,7 @@ from ceho.hot.transport import (
     TransportEvent,
 )
 from ceho.hot.turn import IceRelay
+from tests.conftest import ActiveSession
 from tests.hot.conftest import MemoryControlStore, hot_settings
 from tests.hot.test_offer import ANSWER, OFFER, _session, _signaling, _Turn
 from tests.hot.test_session_api import NOW
@@ -181,7 +182,7 @@ class ScriptedSTT(FrameProcessor):
 class _Commit:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
-        self.calls: list[tuple[str, int | None, MediaProvenance | None]] = []
+        self.calls: list[tuple[str, int | None, MediaProvenance | None, str | None]] = []
         self._next = 7
 
     def __call__(
@@ -194,7 +195,12 @@ class _Commit:
         if self.fail:
             raise RuntimeError("commit failed")
         text = getattr(candidate, "text")
-        self.calls.append((text, session_speaker_id, provenance))
+        label = getattr(candidate, "speaker_label", None)
+        if not isinstance(text, str):
+            raise AssertionError("candidate text must be a string")
+        if label is not None and not isinstance(label, str):
+            raise AssertionError("speaker label must be a string")
+        self.calls.append((text, session_speaker_id, provenance, label))
         if session_speaker_id is not None:
             return session_speaker_id
         speaker = self._next
@@ -342,6 +348,120 @@ async def test_final_transcript_reuses_the_session_speaker_and_stores_one_object
     assert first.media_object_id == 1
     assert first.media_start_offset_ms == 0
     assert first.media_end_offset_ms == 100
+
+
+class _Diarized(FrameProcessor):
+    """Emit one unlabeled final, one two-speaker final, then another unlabeled final."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._done = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, InputAudioRawFrame) and not self._done:
+            self._done = True
+            await self.push_frame(
+                TranscriptionFrame(
+                    "hello",
+                    "user",
+                    "2026-01-01T00:00:00Z",
+                    result=_Result(0.0, 0.1),
+                ),
+                direction,
+            )
+            await self.push_frame(
+                TranscriptionFrame(
+                    "I think. First Jensen.",
+                    "user",
+                    "2026-01-01T00:00:00Z",
+                    result=_SpokenResult(),
+                ),
+                direction,
+            )
+            await self.push_frame(
+                TranscriptionFrame(
+                    "again",
+                    "user",
+                    "2026-01-01T00:00:00Z",
+                    result=_Result(0.8, 0.15),
+                ),
+                direction,
+            )
+        await self.push_frame(frame, direction)
+
+
+class _SpokenResult:
+    start = 0.1
+    duration = 0.7
+    channel = {
+        "alternatives": [
+            {
+                "words": [
+                    {"start": 0.1, "end": 0.3, "word": "I", "punctuated_word": "I", "speaker": 0},
+                    {
+                        "start": 0.3,
+                        "end": 0.45,
+                        "word": "think",
+                        "punctuated_word": "think.",
+                        "speaker": 0,
+                    },
+                    {
+                        "start": 0.45,
+                        "end": 0.6,
+                        "word": "First",
+                        "punctuated_word": "First",
+                        "speaker": 1,
+                    },
+                    {
+                        "start": 0.6,
+                        "end": 0.8,
+                        "word": "Jensen",
+                        "punctuated_word": "Jensen.",
+                        "speaker": 1,
+                    },
+                ]
+            }
+        ]
+    }
+
+
+async def test_diarized_finals_are_committed_by_speaker_label() -> None:
+    pcm = _pcm16(1000, 16_000)
+    storage = _Storage()
+    catalog = _Catalog()
+    recorder = DirectSourceRecording(
+        tenant_id=4,
+        session_id=10,
+        source_id=recording_source_id("peer/microphone"),
+        session_started_at=_STARTED,
+        storage=storage,
+        catalog=catalog,
+        config=RecordingConfig(part_bytes=8),
+    )
+    commit = _Commit()
+    transport = _Transport(
+        [
+            _added(),
+            _frame(pcm, timestamp_ms=1000, duration_ms=1000),
+            _removed(),
+            _closed(),
+        ]
+    )
+
+    await attach_microphone(
+        transport,
+        processors=[_Diarized()],
+        recorder=recorder,
+        commit=commit,
+    )
+
+    assert [(call[0], call[1], call[3]) for call in commit.calls] == [
+        ("hello", None, None),
+        ("I think.", None, "0"),
+        ("First Jensen.", None, "1"),
+        ("again", 7, None),
+    ]
 
 
 async def test_timestamp_gap_is_pushed_without_filling_silence() -> None:
@@ -726,3 +846,42 @@ async def test_a_non_pcm_frame_is_skipped_and_later_audio_is_kept() -> None:
     assert stopped.state is RunState.STOPPED
     assert stopped.ends_session is False
     assert recorder.chunks == [(good, 20)]
+
+
+def test_server_commit_stores_each_speaker_number(active_session: ActiveSession) -> None:
+    app = create_app(hot_settings(), engine=active_session.engine)
+    commit = _transcript_commit(app)
+    context = DirectSourceContext(
+        tenant_id=active_session.tenant_id,
+        session_id=active_session.session_id,
+        source_id="mic",
+        session_speaker_id=None,
+    )
+
+    def candidate(text: str, label: str, start_ms: int) -> TranscriptCandidate:
+        return TranscriptCandidate(
+            context,
+            text,
+            start_ms,
+            start_ms + 100,
+            speaker_label=label,
+        )
+
+    first = commit(
+        candidate("I think that the circular financing is good.", "0", 240),
+        session_speaker_id=None,
+        provenance=None,
+    )
+    second = commit(
+        candidate("First of all, Jensen, he stepped down", "1", 9_400),
+        session_speaker_id=first,
+        provenance=None,
+    )
+    again = commit(
+        candidate("So fascinating event.", "0", 12_000),
+        session_speaker_id=second,
+        provenance=None,
+    )
+
+    assert second != first
+    assert again == first

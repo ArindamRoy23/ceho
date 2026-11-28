@@ -5,13 +5,15 @@ candidates. Interim text stays on the run. This module does not write the
 database, publish events, or produce talkback audio.
 
 The processors in front of the candidate sink are injected. The live path
-uses Deepgram speech-to-text and nothing else: no voice activity detector,
-diarization, language model, or speech synthesizer.
+uses Deepgram speech-to-text. Speaker numbers on a final are split only when
+the direct-source config names Deepgram. There is no voice activity detector,
+language model, or speech synthesizer.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -84,6 +86,7 @@ class TranscriptCandidate:
     text: str
     start_ms: int
     end_ms: int
+    speaker_label: str | None = None
 
     def __post_init__(self) -> None:
         if not self.text or self.text != self.text.strip():
@@ -127,6 +130,110 @@ def _field(obj: object, name: str) -> object:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+def _speaker_label(value: object) -> str | None:
+    """Return a Deepgram speaker number as a session-speaker label."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
+        return format(value, "g")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            number = float(stripped)
+        except ValueError:
+            return None
+        if not math.isfinite(number):
+            return None
+        if number.is_integer():
+            return str(int(number))
+        return format(number, "g")
+    return None
+
+
+def _words(result: object) -> list[object] | None:
+    if result is None:
+        return None
+    channel = _field(result, "channel")
+    alternatives = _field(channel, "alternatives") if channel is not None else None
+    if not isinstance(alternatives, list) or not alternatives:
+        return None
+    words = _field(alternatives[0], "words")
+    if not isinstance(words, list) or not words:
+        return None
+    return words
+
+
+def _word_text(word: object) -> str:
+    punctuated = _field(word, "punctuated_word")
+    if isinstance(punctuated, str) and punctuated.strip():
+        return punctuated.strip()
+    raw = _field(word, "word")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return ""
+
+
+def _word_bounds(words: Sequence[object]) -> tuple[float, float] | None:
+    start = _as_float(_field(words[0], "start"))
+    end = _as_float(_field(words[-1], "end"))
+    if start is None or end is None:
+        return None
+    return start, end
+
+
+def _join_words(words: Sequence[object]) -> str:
+    return " ".join(part for part in (_word_text(word) for word in words) if part).strip()
+
+
+def _speaker_pieces(
+    text: str, result: object
+) -> list[tuple[str, str | None, tuple[float, float] | None]]:
+    """Split one final where the Deepgram speaker number changes.
+
+    A result with no speaker number stays one piece and keeps the provider
+    text. One speaker number also keeps that text. A change of number keeps
+    each piece's words and their speech interval.
+    """
+    stripped = text.strip()
+    words = _words(result)
+    if not words:
+        if not stripped:
+            return []
+        return [(stripped, None, None)]
+    labels = [_speaker_label(_field(word, "speaker")) for word in words]
+    if all(label is None for label in labels):
+        if not stripped:
+            return []
+        return [(stripped, None, None)]
+    groups: list[tuple[str | None, list[object]]] = []
+    for word, label in zip(words, labels, strict=True):
+        if groups and groups[-1][0] == label:
+            groups[-1][1].append(word)
+        else:
+            groups.append((label, [word]))
+    if len(groups) == 1:
+        label, group = groups[0]
+        piece = stripped or _join_words(group)
+        if not piece:
+            return []
+        return [(piece, label, _word_bounds(group))]
+    pieces: list[tuple[str, str | None, tuple[float, float] | None]] = []
+    for label, group in groups:
+        piece = _join_words(group)
+        if not piece:
+            continue
+        pieces.append((piece, label, _word_bounds(group)))
+    return pieces
 
 
 def _speech_bounds_seconds(result: object) -> tuple[float, float] | None:
@@ -191,7 +298,7 @@ class DirectSourceRun:
         self._failure_count = 0
         self._origin_ms: int | None = None
         self._partial_text = ""
-        self._seen: set[tuple[int, int, str]] = set()
+        self._seen: set[tuple[int, int, str, str | None]] = set()
         self._candidates: list[TranscriptCandidate] = []
         self._failures: list[PipelineFailure] = []
         self._task: PipelineTask | None = None
@@ -354,19 +461,41 @@ class DirectSourceRun:
     def _note_final(self, frame: TranscriptionFrame) -> None:
         if not self._accepting_candidates:
             return
-        text = frame.text.strip()
-        if not text:
-            return
-        start_ms, end_ms = self._interval_ms(frame.result)
-        key = (start_ms, end_ms, text)
-        if key in self._seen:
-            return
-        self._seen.add(key)
-        self._candidates.append(TranscriptCandidate(self._context, text, start_ms, end_ms))
+        if self._config.stt_provider == "deepgram":
+            pieces = _speaker_pieces(frame.text, frame.result)
+        else:
+            text = frame.text.strip()
+            pieces = [(text, None, None)] if text else []
+        if len(pieces) > 1:
+            logger.debug(
+                "final split",
+                source_id=self._context.source_id,
+                piece_count=len(pieces),
+            )
+        for text, speaker_label, bounds in pieces:
+            start_ms, end_ms = self._interval_ms(frame.result, bounds)
+            key = (start_ms, end_ms, text, speaker_label)
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            self._candidates.append(
+                TranscriptCandidate(
+                    self._context,
+                    text,
+                    start_ms,
+                    end_ms,
+                    speaker_label=speaker_label,
+                )
+            )
 
-    def _interval_ms(self, result: object) -> tuple[int, int]:
+    def _interval_ms(
+        self,
+        result: object,
+        bounds: tuple[float, float] | None = None,
+    ) -> tuple[int, int]:
         origin = 0 if self._origin_ms is None else self._origin_ms
-        bounds = _speech_bounds_seconds(result)
+        if bounds is None:
+            bounds = _speech_bounds_seconds(result)
         if bounds is None:
             return origin, origin
         start_ms = origin + int(bounds[0] * 1000)
@@ -429,7 +558,8 @@ def deepgram_stt(
     """Build the Deepgram speech-to-text processor for one direct source.
 
     The processor emits interim and final transcriptions. It does not speak
-    and it does not call a language model. Diarization is off.
+    and it does not call a language model. Diarization is on: each word can
+    carry a speaker number, and the run splits a final where that number changes.
     """
     key = api_key.strip()
     if not key:
@@ -456,7 +586,7 @@ def deepgram_stt(
             language="en",
             interim_results=True,
             punctuate=True,
-            diarize=False,
+            diarize=True,
             vad_events=False,
             endpointing=300,
         ),

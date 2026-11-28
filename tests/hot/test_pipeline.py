@@ -16,7 +16,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from ceho.hot.config import DIRECT_SOURCE_PIPELINE, ConfigurationError
+from ceho.hot.config import DIRECT_SOURCE_PIPELINE, ConfigurationError, DirectSourcePipelineConfig
 from ceho.hot.pipeline import (
     DirectSourceContext,
     DirectSourceRun,
@@ -37,9 +37,20 @@ def _context() -> DirectSourceContext:
 
 
 class _Word:
-    def __init__(self, start: float, end: float) -> None:
+    def __init__(
+        self,
+        start: float,
+        end: float,
+        *,
+        speaker: float | int | None = None,
+        word: str = "word",
+        punctuated: str | None = None,
+    ) -> None:
         self.start = start
         self.end = end
+        self.speaker = speaker
+        self.word = word
+        self.punctuated_word = word if punctuated is None else punctuated
 
 
 class _Alternative:
@@ -69,9 +80,13 @@ def _transcription(
     *,
     start: float,
     duration: float,
-    words: list[tuple[float, float]] | None = None,
+    words: list[tuple[float, float] | _Word] | None = None,
 ) -> TranscriptionFrame:
-    word_objs = None if words is None else [_Word(start_s, end_s) for start_s, end_s in words]
+    word_objs = (
+        None
+        if words is None
+        else [item if isinstance(item, _Word) else _Word(item[0], item[1]) for item in words]
+    )
     return TranscriptionFrame(
         text,
         "user",
@@ -166,6 +181,7 @@ class PipelineContractTest(unittest.TestCase):
         self.assertIsInstance(processor, FrameProcessor)
         kwargs = cast(Any, processor)._build_connect_kwargs()
         self.assertEqual(kwargs["language"], "en")
+        self.assertEqual(kwargs["diarize"], "true")
 
 
 class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
@@ -181,9 +197,10 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         *,
         pcm: bytes | None = b"\x00\x00",
         timestamp_ms: int = 1000,
+        config: DirectSourcePipelineConfig = DIRECT_SOURCE_PIPELINE,
     ) -> tuple[DirectSourceRun, RunStopped]:
         context = _context()
-        run = DirectSourceRun(context, processors)
+        run = DirectSourceRun(context, processors, config=config)
         await run.start()
         try:
             if pcm is not None:
@@ -203,6 +220,7 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate.start_ms, 1500)
         self.assertEqual(candidate.end_ms, 1900)
         self.assertEqual(candidate.context.session_speaker_id, 7)
+        self.assertIsNone(candidate.speaker_label)
         self.assertIs(candidate.context, run.context)
         self.assertFalse(stopped.ends_session)
         self.assertIs(stopped.state, RunState.STOPPED)
@@ -225,6 +243,155 @@ class DirectSourceRunTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run.candidates[0].start_ms, 1200)
         self.assertEqual(run.candidates[0].end_ms, 1600)
+        self.assertIsNone(run.candidates[0].speaker_label)
+
+    async def test_two_speaker_numbers_split_one_final(self) -> None:
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        _transcription(
+                            "I think. First Jensen.",
+                            start=0.0,
+                            duration=2.0,
+                            words=[
+                                _Word(0.2, 0.6, speaker=0, word="I", punctuated="I"),
+                                _Word(0.6, 1.0, speaker=0, word="think", punctuated="think."),
+                                _Word(1.2, 1.6, speaker=1, word="First", punctuated="First"),
+                                _Word(1.6, 2.0, speaker=1.0, word="Jensen", punctuated="Jensen."),
+                            ],
+                        )
+                    ]
+                )
+            ]
+        )
+
+        pieces = [
+            (item.text, item.speaker_label, item.start_ms, item.end_ms) for item in run.candidates
+        ]
+        self.assertEqual(
+            pieces,
+            [
+                ("I think.", "0", 1200, 2000),
+                ("First Jensen.", "1", 2200, 3000),
+            ],
+        )
+
+    async def test_another_provider_keeps_one_final_when_words_have_speaker_numbers(self) -> None:
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        _transcription(
+                            "I think. First Jensen.",
+                            start=0.0,
+                            duration=2.0,
+                            words=[
+                                _Word(0.2, 0.6, speaker=0, word="I", punctuated="I"),
+                                _Word(0.6, 1.0, speaker=0, word="think", punctuated="think."),
+                                _Word(1.2, 1.6, speaker=1, word="First", punctuated="First"),
+                                _Word(1.6, 2.0, speaker=1.0, word="Jensen", punctuated="Jensen."),
+                            ],
+                        )
+                    ]
+                )
+            ],
+            config=DirectSourcePipelineConfig(stt_provider="other"),
+        )
+
+        self.assertEqual(len(run.candidates), 1)
+        self.assertEqual(run.candidates[0].text, "I think. First Jensen.")
+        self.assertIsNone(run.candidates[0].speaker_label)
+
+    async def test_one_speaker_number_keeps_the_provider_text(self) -> None:
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        _transcription(
+                            "Hello, there.",
+                            start=0.0,
+                            duration=1.0,
+                            words=[
+                                _Word(0.2, 0.4, speaker=0, word="Hello", punctuated="Hello"),
+                                _Word(0.4, 0.8, speaker=0, word="there", punctuated="there"),
+                            ],
+                        )
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(len(run.candidates), 1)
+        self.assertEqual(run.candidates[0].text, "Hello, there.")
+        self.assertEqual(run.candidates[0].speaker_label, "0")
+        self.assertEqual(run.candidates[0].start_ms, 1200)
+        self.assertEqual(run.candidates[0].end_ms, 1800)
+
+    async def test_speaker_number_returning_splits_again(self) -> None:
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        _transcription(
+                            "one two three",
+                            start=0.0,
+                            duration=1.0,
+                            words=[
+                                _Word(0.1, 0.2, speaker=0, punctuated="one"),
+                                _Word(0.3, 0.4, speaker=1, punctuated="two"),
+                                _Word(0.5, 0.6, speaker=0, punctuated="three"),
+                            ],
+                        )
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(
+            [(item.text, item.speaker_label) for item in run.candidates],
+            [("one", "0"), ("two", "1"), ("three", "0")],
+        )
+
+    async def test_dict_words_with_no_speaker_stay_one_candidate(self) -> None:
+        class _DictResult:
+            start = 0.5
+            duration = 0.4
+            channel = {
+                "alternatives": [
+                    {
+                        "words": [
+                            {
+                                "start": 0.5,
+                                "end": 0.9,
+                                "word": "hello",
+                                "punctuated_word": "hello",
+                            }
+                        ]
+                    }
+                ]
+            }
+
+        run, _stopped = await self._collect(
+            [
+                ScriptedSTT(
+                    [
+                        TranscriptionFrame(
+                            "hello",
+                            "user",
+                            "2026-01-01T00:00:00Z",
+                            result=_DictResult(),
+                        )
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(len(run.candidates), 1)
+        self.assertEqual(run.candidates[0].text, "hello")
+        self.assertIsNone(run.candidates[0].speaker_label)
+        self.assertEqual(run.candidates[0].start_ms, 1500)
+        self.assertEqual(run.candidates[0].end_ms, 1900)
 
     async def test_empty_text_is_rejected_and_partials_stay_inside(self) -> None:
         run, _stopped = await self._collect(

@@ -676,6 +676,7 @@ def _transcript_commit(app: FastAPI) -> TranscriptCommit:
             start_ms=candidate.start_ms,
             end_ms=candidate.end_ms,
             session_speaker_id=session_speaker_id,
+            label=candidate.speaker_label,
             media_object_id=None if provenance is None else provenance.media_object_id,
             media_start_offset_ms=None if provenance is None else provenance.media_start_offset_ms,
             media_end_offset_ms=None if provenance is None else provenance.media_end_offset_ms,

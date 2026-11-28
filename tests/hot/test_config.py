@@ -106,8 +106,18 @@ class HotServerSettingsTest(unittest.TestCase):
         self.assertEqual(audio.sample_width, 2)
         self.assertEqual(audio.channels, 1)
         self.assertEqual(audio.max_provider_failures, 3)
+        self.assertEqual(audio.stt_provider, "deepgram")
         self.assertEqual(audio.frame_bytes(20), 640)
         self.assertEqual(DIRECT_SOURCE_PIPELINE, audio)
+
+    def test_blank_stt_provider_fails_clearly(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "stt_provider must be configured"):
+            DirectSourcePipelineConfig(stt_provider="  ")
+
+    def test_stt_provider_is_normalized(self) -> None:
+        audio = DirectSourcePipelineConfig(stt_provider=" Deepgram ")
+
+        self.assertEqual(audio.stt_provider, "deepgram")
 
     def test_recording_bounds_default_to_a_bounded_queue_and_five_mebibyte_parts(self) -> None:
         recording = RecordingConfig()
